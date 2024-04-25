@@ -17,8 +17,8 @@ def IWAE_reconstruction_loss(batch_dict, encoder, decoder, z0_prior, obsrv_std,
     time_steps_to_predict = batch_dict["tp_to_predict"]  # [n_tp_pred]
 
     # encoder
-    truth_w_mask = torch.cat((truth, mask), dim=-1) if mask is not None else truth
-    first_point_mu, first_point_std = encoder(truth_w_mask, truth_time_steps, run_backwards=run_backwards)
+    # truth_w_mask = torch.cat((truth, mask), dim=-1) if mask is not None else truth
+    first_point_mu, first_point_std = encoder(truth, mask, truth_time_steps, run_backwards=run_backwards)
     assert (torch.sum(first_point_std < 0) == 0.)
 
     # Reparameterization

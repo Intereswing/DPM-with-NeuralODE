@@ -1,5 +1,10 @@
+import math
+
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
+from torch.nn import GRU
+
 from utils.utils import get_device
 from utils import utils
 
@@ -120,9 +125,11 @@ class Encoder_z0_ODE_RNN(nn.Module):
             nn.Linear(100, self.z0_dim * 2), )
         utils.init_network_weights(self.transform_z0)
 
-    def forward(self, data, time_steps, run_backwards=True, save_info=False):
+    def forward(self, data, mask, time_steps, run_backwards=True, save_info=False):
         # data, time_steps -- observations and their time stamps
         # IMPORTANT: assumes that 'data' already has mask concatenated to it
+        if mask is not None:
+            data = torch.cat((data, mask), dim=-1)
         assert (not torch.isnan(data).any())
         assert (not torch.isnan(time_steps).any())
 
@@ -232,3 +239,260 @@ class Encoder_z0_ODE_RNN(nn.Module):
         assert (not torch.isnan(yi_std).any())
 
         return yi, yi_std, latent_ys, extra_info
+
+
+class Encoder_z0_RNN(nn.Module):
+    def __init__(self, latent_dim, input_dim, lstm_output_size=20,
+                 use_delta_t=True, device=torch.device("cpu")):
+
+        super(Encoder_z0_RNN, self).__init__()
+
+        self.gru_rnn_output_size = lstm_output_size
+        self.latent_dim = latent_dim
+        self.input_dim = input_dim
+        self.device = device
+        self.use_delta_t = use_delta_t
+
+        self.hiddens_to_z0 = nn.Sequential(
+            nn.Linear(self.gru_rnn_output_size, 50),
+            nn.Tanh(),
+            nn.Linear(50, latent_dim * 2), )
+
+        utils.init_network_weights(self.hiddens_to_z0)
+
+        input_dim = self.input_dim
+
+        if use_delta_t:
+            self.input_dim += 1
+        self.gru_rnn = GRU(self.input_dim, self.gru_rnn_output_size).to(device)
+
+    def forward(self, data, mask, time_steps, run_backwards=True):
+        # IMPORTANT: assumes that 'data' already has mask concatenated to it
+
+        # data shape: [n_traj, n_tp, n_dims]
+        # shape required for rnn: (seq_len, batch, input_size)
+        # t0: not used here
+        if mask is not None:
+            data = torch.cat((data, mask), dim=-1)
+        n_traj = data.size(0)
+
+        assert (not torch.isnan(data).any())
+        assert (not torch.isnan(time_steps).any())
+
+        data = data.permute(1, 0, 2)
+
+        if run_backwards:
+            # Look at data in the reverse order: from later points to the first
+            data = utils.reverse(data)
+
+        if self.use_delta_t:
+            delta_t = time_steps[1:] - time_steps[:-1]
+            if run_backwards:
+                # we are going backwards in time with
+                delta_t = utils.reverse(delta_t)
+            # append zero delta t in the end
+            delta_t = torch.cat((delta_t, torch.zeros(1).to(self.device)))
+            delta_t = delta_t.unsqueeze(1).repeat((1, n_traj)).unsqueeze(-1)
+            data = torch.cat((delta_t, data), -1)
+
+        outputs, _ = self.gru_rnn(data)
+
+        # LSTM output shape: (seq_len, batch, num_directions * hidden_size)
+        last_output = outputs[-1]
+
+        self.extra_info = {"rnn_outputs": outputs, "time_points": time_steps}
+
+        mean, std = utils.split_last_dim(self.hiddens_to_z0(last_output))
+        std = std.abs()
+
+        assert (not torch.isnan(mean).any())
+        assert (not torch.isnan(std).any())
+
+        return mean.unsqueeze(0), std.unsqueeze(0)
+
+
+class EncoderAttention(nn.Module):
+    def __init__(self, input_dim, d_model, nhead, d_ff, num_layers, latent_dim, dropout=0.1, use_split=False):
+        super(EncoderAttention, self).__init__()
+        self.position_encoder = PositionEncoder(input_dim)
+        self.num_layers = num_layers
+        self.attention_encoder_layers = nn.ModuleList(
+            [EncoderAttentionLayer(input_dim, d_model, nhead, d_ff, dropout=dropout, use_split=use_split)
+             for _ in range(num_layers)])
+        self.norm = Norm(input_dim)
+        self.transform_z0 = nn.Sequential(
+            nn.Linear(input_dim, 100),
+            nn.Tanh(),
+            nn.Linear(100, latent_dim * 2), )
+        utils.init_network_weights(self.transform_z0)
+
+    def forward(self, data, mask, time_steps, run_backwards=True):
+        """
+        :param data: [batch_size, n_tp, input_dim]
+        :param mask: [batch_size, n_tp, input_dim]
+        :param time_steps: [n_tp]
+        :param run_backwards:
+        :return:
+        """
+        out = self.position_encoder(data, mask, time_steps)
+        for layer in self.attention_encoder_layers:
+            out = layer(out, mask)
+        out = self.norm(out)  # shape: [batch_size, n_tp, input_dim]
+
+        # Find the mean on all tp.
+        if run_backwards:
+            out = out[:, 0, :]
+        else:
+            out = torch.mean(out, 1)  # [batch_size, input_dim]
+        out = out.unsqueeze(0)
+        out = self.transform_z0(out)
+        mean_z0, std_z0 = utils.split_last_dim(out)
+        std_z0 = std_z0.abs()
+        return mean_z0, std_z0
+
+
+class PositionEncoder(nn.Module):
+    def __init__(self, input_dim):
+        super(PositionEncoder, self).__init__()
+        self.input_dim = input_dim
+
+    def forward(self, data, mask, time_steps):
+        batch_size = data.size(0)
+        # make embeddings relatively larger
+        data = data * math.sqrt(self.input_dim)
+
+        pe = torch.zeros(time_steps.size(0), self.input_dim, requires_grad=False).to(get_device(data))
+        for pos in range(time_steps.size(0)):
+            for i in range(0, self.input_dim, 2):
+                pe[pos, i] = torch.sin(time_steps[pos] / (10000 ** ((2 * i) / self.input_dim)))
+                if i == self.input_dim - 1:
+                    break
+                pe[pos, i + 1] = torch.cos(time_steps[pos] / (10000 ** ((2 * (i + 1)) / self.input_dim)))
+        pe = pe.repeat(batch_size, 1, 1)
+        mask = mask.sum(dim=-1, keepdim=True) == 0.
+        mask = mask.repeat(1, 1, self.input_dim)
+        pe = torch.masked_fill(pe, mask, 0)
+
+        data = data + pe
+        # subsample_num = 800
+        # if time_steps.size(0) > subsample_num:
+        #     subsample_idx = torch.randperm(time_steps.size(0))[:subsample_num].sort()[0]
+        #     data = data[:, subsample_idx, :]
+        #     mask = mask[:, subsample_idx, :]
+        return data
+
+
+class MultiHeadAttention(nn.Module):
+    def __init__(self, input_dim, d_model, nhead, dropout=0.1, use_split=False):
+        super(MultiHeadAttention, self).__init__()
+        self.input_dim = input_dim
+        self.d_model = d_model
+        self.nhead = nhead
+        self.dropout = nn.Dropout(dropout)
+        self.WQs = nn.Linear(input_dim, d_model * nhead)
+        self.WKs = nn.Linear(input_dim, d_model * nhead)
+        self.WVs = nn.Linear(input_dim, d_model * nhead)
+        self.WO = nn.Linear(d_model * nhead, input_dim)
+        self.n_tp_split = 192 if use_split else None
+
+    def forward(self, data, mask):
+        mask = mask.sum(dim=-1, keepdim=True) == 0.
+        mask = mask.repeat(1, 1, self.input_dim)
+        data = torch.masked_fill(data, mask, 0)
+
+        batch_size, n_tp, input_dim = data.size()
+        Qs = self.WQs(data)
+        Ks = self.WKs(data)
+        Vs = self.WVs(data)
+
+        Qs = Qs.reshape(batch_size, n_tp, self.d_model, self.nhead)
+        Ks = Ks.reshape(batch_size, n_tp, self.d_model, self.nhead)
+        Vs = Vs.reshape(batch_size, n_tp, self.d_model, self.nhead)
+
+        # shape: [batch_size, nhead, n_tp, d_model]
+        Qs = Qs.permute(0, 3, 1, 2)
+        Ks = Ks.permute(0, 3, 1, 2)
+        Vs = Vs.permute(0, 3, 1, 2)
+
+        if self.n_tp_split is not None:
+            scores = []
+            for i in range(0, n_tp, self.n_tp_split):
+                end = i + self.n_tp_split
+                if end > n_tp:
+                    end = n_tp
+                Qs_split = Qs[:, :, i:end, :]
+                Ks_split = Ks[:, :, i:end, :]
+                Vs_split = Vs[:, :, i:end, :]
+                scores_split = torch.matmul(Qs_split, Ks_split.permute(0, 1, 3, 2)) / math.sqrt(self.d_model)
+                scores_split = F.softmax(scores_split, dim=-1)
+                scores_split = torch.matmul(scores_split, Vs_split)
+                scores.append(scores_split)
+            scores = torch.cat(scores, dim=-2)
+        else:
+            scores = torch.matmul(Qs, Ks.permute(0, 1, 3, 2)) / math.sqrt(self.d_model)
+            scores = F.softmax(scores, dim=-1)
+            scores = self.dropout(scores)
+            scores = torch.matmul(scores, Vs)
+
+        # shape: [batch_size, nhead, n_tp, n_tp]
+        # scores = torch.matmul(Qs, Ks.permute(0, 1, 3, 2)) / math.sqrt(self.d_model)
+        # if mask is not None:
+        #     # shape: [batch_size, n_tp]. True indicates that there are no observation in the time_point.
+        #     mask = torch.sum(mask, dim=-1) == 0.
+        #     scores = scores.permute(1, 2, 0, 3)
+        #     # make these time points' score very low.
+        #     scores = scores.masked_fill(mask, -1e9)
+        #     scores = scores.permute(2, 0, 1, 3)
+        # scores = F.softmax(scores, dim=-1)
+        # scores = self.dropout(scores)
+        # scores = torch.matmul(scores, Vs)
+
+        scores = scores.permute(0, 2, 1, 3)
+        scores = scores.reshape(batch_size, n_tp, self.nhead * self.d_model)
+        scores = self.WO(scores)
+        return scores
+
+
+class FeedForward(nn.Module):
+    def __init__(self, input_dim, d_ff, dropout=0.1):
+        super(FeedForward, self).__init__()
+        self.linear_1 = nn.Linear(input_dim, d_ff)
+        self.dropout = nn.Dropout(dropout)
+        self.linear_2 = nn.Linear(d_ff, input_dim)
+
+    def forward(self, x):
+        x = self.linear_1(x)
+        x = F.tanh(x)
+        x = self.dropout(x)
+        x = self.linear_2(x)
+        return x
+
+
+class Norm(nn.Module):
+    def __init__(self, input_dim, eps=1e-6):
+        super(Norm, self).__init__()
+
+        self.size = input_dim
+        self.alpha = nn.Parameter(torch.ones(self.size))
+        self.bias = nn.Parameter(torch.zeros(self.size))
+        self.eps = eps
+
+    def forward(self, x):
+        x = self.alpha * (x - x.mean(dim=-1, keepdim=True)) / (x.std(dim=-1, keepdim=True) + self.eps) + self.bias
+        return x
+
+
+class EncoderAttentionLayer(nn.Module):
+    def __init__(self, input_dim, d_model, nhead, d_ff, dropout=0.1, use_split=False):
+        super(EncoderAttentionLayer, self).__init__()
+        self.norm1 = Norm(input_dim, eps=1e-6)
+        self.norm2 = Norm(input_dim, eps=1e-6)
+        self.attn = MultiHeadAttention(input_dim, d_model, nhead, dropout=dropout, use_split=use_split)
+        self.feedforward = FeedForward(input_dim, d_ff, dropout=dropout)
+        self.dropout1 = nn.Dropout(dropout)
+        self.dropout2 = nn.Dropout(dropout)
+
+    def forward(self, x, mask):
+        x = x + self.dropout1(self.attn(self.norm1(x), mask))
+        x = x + self.dropout2(self.feedforward(self.norm2(x)))
+        return x

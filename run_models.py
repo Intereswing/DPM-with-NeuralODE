@@ -17,7 +17,7 @@ from torch.distributions.normal import Normal
 
 from model.vae import VAE
 from model.decoder import ODEFunc, DiffeqSolver, DiffeqSolverDecoder
-from model.encoder import Encoder_z0_ODE_RNN
+from model.encoder import Encoder_z0_ODE_RNN, EncoderAttention, Encoder_z0_RNN
 from model.classifier import Classifier
 from model.loss import IWAE_reconstruction_loss, compute_binary_CE_loss
 from utils import utils
@@ -62,8 +62,8 @@ parser.add_argument('--noise-weight', type=float, default=0.01, help="Noise ampl
 
 # model selection
 parser.add_argument('--latent-ode', action='store_true', help="Run Latent ODE seq2seq model")
-parser.add_argument('--z0-encoder', type=str, default='odernn',
-                    help="Type of encoder for Latent ODE model: odernn or rnn")
+parser.add_argument('--encoder', type=str, default='odernn',
+                    help="Type of encoder for Latent ODE model: rnn , odernn, attn, mamba")
 parser.add_argument('--classic-rnn', action='store_true',
                     help="Run RNN baseline: classic RNN that sees true points at every point. "
                          "Used for interpolation only.")
@@ -144,11 +144,31 @@ if __name__ == '__main__':
         latents = args.latents
         gen_layers = args.gen_layers
         units = args.units
+        rec_dims = args.rec_dims
 
-        rec_ode_func = ODEFunc(args.rec_dims, args.rec_layers, units, nonlinear=nn.Tanh).to(device)
-        z0_diffeq_solver = DiffeqSolver(rec_ode_func, 'euler', odeint_rtol=1e-3, odeint_atol=1e-4).to(device)
-        encoder = Encoder_z0_ODE_RNN(args.rec_dims, int(input_dim) * 2, z0_diffeq_solver,
-                                     z0_dim=latents, n_gru_units=args.gru_units).to(device)
+        if args.encoder == 'rnn':
+            encoder = Encoder_z0_RNN(latents, int(input_dim) * 2,
+                                     lstm_output_size=rec_dims, device=device).to(device)
+        elif args.encoder == 'odernn':
+            rec_ode_func = ODEFunc(rec_dims, args.rec_layers, units, nonlinear=nn.Tanh).to(device)
+            z0_diffeq_solver = DiffeqSolver(rec_ode_func, 'euler', odeint_rtol=1e-3, odeint_atol=1e-4).to(device)
+            encoder = Encoder_z0_ODE_RNN(rec_dims, int(input_dim) * 2, z0_diffeq_solver,
+                                         z0_dim=latents, n_gru_units=args.gru_units).to(device)
+        elif args.encoder == 'attn':
+            encoder = EncoderAttention(
+                input_dim=input_dim,
+                d_model=64,
+                nhead=8,
+                d_ff=512,
+                num_layers=6,
+                latent_dim=latents,
+                dropout=0.5,
+                use_split=False
+            ).to(device)
+        elif args.encoder == 'mamba':
+            raise NotImplementedError('Not implemented yet')
+        else:
+            raise Exception('Please provide a valid encoder type')
         dec_ode_func = ODEFunc(latents, gen_layers, units, nonlinear=nn.Tanh).to(device)
         decoder = DiffeqSolverDecoder(latents, input_dim, dec_ode_func,
                                       method='dopri5', odeint_rtol=1e-3, odeint_atol=1e-4).to(device)
@@ -171,7 +191,7 @@ if __name__ == '__main__':
         exit()
 
     # training
-    log_path = 'logs/' + file_name + '_' + str(experimentID) + '.log'
+    log_path = 'logs/' + file_name + '_' + str(experimentID) + '_' + args.encoder + '_' + args.dataset + '.log'
     utils.makedirs('logs/')
     logger = utils.get_logger(logpath=log_path, filepath=os.path.abspath(__file__))
     logger.info(input_command)
@@ -181,13 +201,13 @@ if __name__ == '__main__':
 
     for itr in range(1, n_batches * (args.niters + 1)):
         optimizer.zero_grad()
-        utils.update_learning_rate(optimizer, decay_rate=0.999, lowest=args.lr/10)
+        utils.update_learning_rate(optimizer, decay_rate=0.999, lowest=args.lr / 10)
 
-        wait_until_kl_inc =10
+        wait_until_kl_inc = 10
         if itr // n_batches < wait_until_kl_inc:
             kl_coef = 0.
         else:
-            kl_coef = (1-0.99**(itr // n_batches - wait_until_kl_inc))
+            kl_coef = (1 - 0.99 ** (itr // n_batches - wait_until_kl_inc))
 
         batch_dict = utils.get_next_batch(data_obj['train_dataloader'])
         train_res = model.compute_all_losses(batch_dict, n_traj_samples=3, kl_coef=kl_coef)
@@ -242,29 +262,3 @@ if __name__ == '__main__':
         'args': args,
         'state_dict': model.state_dict(),
     }, ckpt_path)
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    
