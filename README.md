@@ -1,4 +1,4 @@
-# Latent ODE with various encoder.
+# Latent-ODE-with-various-encoder
 A time series forcasting model based on Latent-ODE.
 
 * Physionet (discretization by 1 min)
