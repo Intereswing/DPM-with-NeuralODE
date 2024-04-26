@@ -27,7 +27,10 @@ from parse_dataset import parse_datasets
 import matplotlib
 import matplotlib.pyplot as plt
 
-matplotlib.use('TkAgg')
+if sys.platform.startswith('win'):
+    matplotlib.use('TkAgg')
+else:
+    matplotlib.use('Agg')
 
 parser = argparse.ArgumentParser('Latent ODE')
 
@@ -156,7 +159,7 @@ if __name__ == '__main__':
                                          z0_dim=latents, n_gru_units=args.gru_units).to(device)
         elif args.encoder == 'attn':
             encoder = EncoderAttention(
-                input_dim=input_dim,
+                input_dim=int(input_dim) * 2,
                 d_model=64,
                 nhead=8,
                 d_ff=512,

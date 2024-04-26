@@ -1,4 +1,5 @@
 import os
+import sys
 import matplotlib
 from utils import utils as utils
 import numpy as np
@@ -8,7 +9,10 @@ from torch.utils.data import DataLoader
 from torchvision.datasets.utils import download_url
 import matplotlib.pyplot as plt
 
-matplotlib.use('TkAgg')
+if sys.platform.startswith('win'):
+    matplotlib.use('TkAgg')
+else:
+    matplotlib.use('Agg')
 
 
 # Adapted from: https://github.com/rtqichen/time-series-datasets

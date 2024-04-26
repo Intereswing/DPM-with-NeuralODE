@@ -125,11 +125,9 @@ class Encoder_z0_ODE_RNN(nn.Module):
             nn.Linear(100, self.z0_dim * 2), )
         utils.init_network_weights(self.transform_z0)
 
-    def forward(self, data, mask, time_steps, run_backwards=True, save_info=False):
+    def forward(self, data, time_steps, run_backwards=True, save_info=False):
         # data, time_steps -- observations and their time stamps
         # IMPORTANT: assumes that 'data' already has mask concatenated to it
-        if mask is not None:
-            data = torch.cat((data, mask), dim=-1)
         assert (not torch.isnan(data).any())
         assert (not torch.isnan(time_steps).any())
 
@@ -266,14 +264,12 @@ class Encoder_z0_RNN(nn.Module):
             self.input_dim += 1
         self.gru_rnn = GRU(self.input_dim, self.gru_rnn_output_size).to(device)
 
-    def forward(self, data, mask, time_steps, run_backwards=True):
+    def forward(self, data, time_steps, run_backwards=True):
         # IMPORTANT: assumes that 'data' already has mask concatenated to it
 
         # data shape: [n_traj, n_tp, n_dims]
         # shape required for rnn: (seq_len, batch, input_size)
         # t0: not used here
-        if mask is not None:
-            data = torch.cat((data, mask), dim=-1)
         n_traj = data.size(0)
 
         assert (not torch.isnan(data).any())
@@ -326,27 +322,26 @@ class EncoderAttention(nn.Module):
             nn.Linear(100, latent_dim * 2), )
         utils.init_network_weights(self.transform_z0)
 
-    def forward(self, data, mask, time_steps, run_backwards=True):
+    def forward(self, x, time_steps, run_backwards=True):
         """
-        :param data: [batch_size, n_tp, input_dim]
-        :param mask: [batch_size, n_tp, input_dim]
+        :param x: [batch_size, n_tp, input_dim]
         :param time_steps: [n_tp]
         :param run_backwards:
         :return:
         """
-        out = self.position_encoder(data, mask, time_steps)
+        x = self.position_encoder(x, time_steps)
         for layer in self.attention_encoder_layers:
-            out = layer(out, mask)
-        out = self.norm(out)  # shape: [batch_size, n_tp, input_dim]
+            x = layer(x)
+        x = self.norm(x)  # shape: [batch_size, n_tp, input_dim]
 
         # Find the mean on all tp.
         if run_backwards:
-            out = out[:, 0, :]
+            x = x[:, 0, :]
         else:
-            out = torch.mean(out, 1)  # [batch_size, input_dim]
-        out = out.unsqueeze(0)
-        out = self.transform_z0(out)
-        mean_z0, std_z0 = utils.split_last_dim(out)
+            x = torch.mean(x, 1)  # [batch_size, input_dim]
+        x = x.unsqueeze(0)
+        x = self.transform_z0(x)
+        mean_z0, std_z0 = utils.split_last_dim(x)
         std_z0 = std_z0.abs()
         return mean_z0, std_z0
 
@@ -356,22 +351,22 @@ class PositionEncoder(nn.Module):
         super(PositionEncoder, self).__init__()
         self.input_dim = input_dim
 
-    def forward(self, data, mask, time_steps):
-        batch_size = data.size(0)
+    def forward(self, data, time_steps):
+        batch_size, n_tp, n_dim = data.size()
         # make embeddings relatively larger
         data = data * math.sqrt(self.input_dim)
 
-        pe = torch.zeros(time_steps.size(0), self.input_dim, requires_grad=False).to(get_device(data))
-        for pos in range(time_steps.size(0)):
-            for i in range(0, self.input_dim, 2):
-                pe[pos, i] = torch.sin(time_steps[pos] / (10000 ** ((2 * i) / self.input_dim)))
+        pe = torch.zeros(n_tp, n_dim, requires_grad=False).to(get_device(data))
+        for pos in range(n_tp):
+            for i in range(0, n_dim, 2):
+                pe[pos, i] = torch.sin(time_steps[pos] / (10000 ** (i / n_dim)))
                 if i == self.input_dim - 1:
                     break
-                pe[pos, i + 1] = torch.cos(time_steps[pos] / (10000 ** ((2 * (i + 1)) / self.input_dim)))
-        pe = pe.repeat(batch_size, 1, 1)
-        mask = mask.sum(dim=-1, keepdim=True) == 0.
-        mask = mask.repeat(1, 1, self.input_dim)
-        pe = torch.masked_fill(pe, mask, 0)
+                pe[pos, i + 1] = torch.cos(time_steps[pos] / (10000 ** (i / n_dim)))
+        pe = pe.unsqueeze(0)
+        # mask = mask.sum(dim=-1, keepdim=True) == 0.
+        # mask = mask.repeat(1, 1, self.input_dim)
+        # pe = torch.masked_fill(pe, mask, 0)
 
         data = data + pe
         # subsample_num = 800
@@ -395,10 +390,10 @@ class MultiHeadAttention(nn.Module):
         self.WO = nn.Linear(d_model * nhead, input_dim)
         self.n_tp_split = 192 if use_split else None
 
-    def forward(self, data, mask):
-        mask = mask.sum(dim=-1, keepdim=True) == 0.
-        mask = mask.repeat(1, 1, self.input_dim)
-        data = torch.masked_fill(data, mask, 0)
+    def forward(self, data):
+        # mask = mask.sum(dim=-1, keepdim=True) == 0.
+        # mask = mask.repeat(1, 1, self.input_dim)
+        # data = torch.masked_fill(data, mask, 0)
 
         batch_size, n_tp, input_dim = data.size()
         Qs = self.WQs(data)
@@ -429,23 +424,18 @@ class MultiHeadAttention(nn.Module):
                 scores.append(scores_split)
             scores = torch.cat(scores, dim=-2)
         else:
+            # shape: [batch_size, nhead, n_tp, n_tp]
             scores = torch.matmul(Qs, Ks.permute(0, 1, 3, 2)) / math.sqrt(self.d_model)
+            # if mask is not None:
+            #     # shape: [batch_size, n_tp]. True indicates that there are no observation in the time_point.
+            #     mask = torch.sum(mask, dim=-1) == 0.
+            #     scores = scores.permute(1, 2, 0, 3)
+            #     # make these time points' score very low.
+            #     scores = scores.masked_fill(mask, -1e9)
+            #     scores = scores.permute(2, 0, 1, 3)
             scores = F.softmax(scores, dim=-1)
             scores = self.dropout(scores)
             scores = torch.matmul(scores, Vs)
-
-        # shape: [batch_size, nhead, n_tp, n_tp]
-        # scores = torch.matmul(Qs, Ks.permute(0, 1, 3, 2)) / math.sqrt(self.d_model)
-        # if mask is not None:
-        #     # shape: [batch_size, n_tp]. True indicates that there are no observation in the time_point.
-        #     mask = torch.sum(mask, dim=-1) == 0.
-        #     scores = scores.permute(1, 2, 0, 3)
-        #     # make these time points' score very low.
-        #     scores = scores.masked_fill(mask, -1e9)
-        #     scores = scores.permute(2, 0, 1, 3)
-        # scores = F.softmax(scores, dim=-1)
-        # scores = self.dropout(scores)
-        # scores = torch.matmul(scores, Vs)
 
         scores = scores.permute(0, 2, 1, 3)
         scores = scores.reshape(batch_size, n_tp, self.nhead * self.d_model)
@@ -492,7 +482,7 @@ class EncoderAttentionLayer(nn.Module):
         self.dropout1 = nn.Dropout(dropout)
         self.dropout2 = nn.Dropout(dropout)
 
-    def forward(self, x, mask):
-        x = x + self.dropout1(self.attn(self.norm1(x), mask))
+    def forward(self, x):
+        x = x + self.dropout1(self.attn(self.norm1(x)))
         x = x + self.dropout2(self.feedforward(self.norm2(x)))
         return x
