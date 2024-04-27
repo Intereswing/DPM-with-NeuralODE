@@ -382,10 +382,10 @@ class PositionEncoder(nn.Module):
         pe = torch.zeros(n_tp, n_dim, requires_grad=False).to(get_device(data))
         for pos in range(n_tp):
             for i in range(0, n_dim, 2):
-                pe[pos, i] = torch.sin(time_steps[pos] / (10000 ** (i / n_dim)))
+                pe[pos, i] = torch.sin((time_steps[pos] * 48) / (10000 ** (i / n_dim)))
                 if i == self.input_dim - 1:
                     break
-                pe[pos, i + 1] = torch.cos(time_steps[pos] / (10000 ** (i / n_dim)))
+                pe[pos, i +  1]= torch.cos((time_steps[pos] * 48) / (10000 ** (i / n_dim)))
         pe = pe.repeat(batch_size, 1, 1)
         mask = mask.sum(dim=-1, keepdim=True) == 0.
         mask = mask.repeat(1, 1, self.input_dim)
@@ -538,7 +538,7 @@ class EncoderMamba(nn.Module):
         x = x[:, :, :n_data_dims]
         # TODO: How to use the mask?
 
-        x = self.position_encoder(x, mask, time_steps)
+        # x = self.position_encoder(x, mask, time_steps)
 
         if run_backwards:
             x = x.flip(1)
