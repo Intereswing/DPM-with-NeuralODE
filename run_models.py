@@ -246,7 +246,7 @@ if __name__ == '__main__':
                 logger.info(message)
                 logger.info('KL coef: {}'.format(kl_coef))
                 logger.info('Train loss (one batch): {}'.format(train_res['loss'].detach()))
-                logger.info('Train CE loss (one batch): {}'.format(test_res['ce_loss'].detach()))
+                logger.info('Train CE loss (one batch): {}'.format(train_res['ce_loss'].detach()))
 
                 if 'auc' in test_res:
                     logger.info('Classification AUC (TEST): {:.4f}'.format(test_res['auc']))

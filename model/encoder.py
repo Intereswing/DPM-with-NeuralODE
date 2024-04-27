@@ -6,11 +6,18 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.nn import GRU
 
-from mamba_ssm.models.mixer_seq_simple import create_block, _init_weights
-from mamba_ssm.models.config_mamba import MambaConfig
-from mamba_ssm.modules.mamba_simple import Block, Mamba
-from mamba_ssm.utils.generation import GenerationMixin
-from mamba_ssm.utils.hf import load_config_hf, load_state_dict_hf
+try:
+    from mamba_ssm.models.mixer_seq_simple import create_block, _init_weights
+    from mamba_ssm.models.config_mamba import MambaConfig
+    from mamba_ssm.modules.mamba_simple import Block, Mamba
+    from mamba_ssm.utils.generation import GenerationMixin
+    from mamba_ssm.utils.hf import load_config_hf, load_state_dict_hf
+except ImportError:
+    create_block, _init_weights = None, None
+    MambaConfig = None
+    Block, Mamba = None, None
+    GenerationMixin = None
+    load_config_hf, load_state_dict_hf = None, None
 try:
     from mamba_ssm.ops.triton.layernorm import RMSNorm, layer_norm_fn, rms_norm_fn
 except ImportError:
@@ -340,16 +347,21 @@ class EncoderAttention(nn.Module):
         :param run_backwards:
         :return:
         """
+        n_data_dims = x.size(-1) // 2
+        mask = x[:, :, n_data_dims:]
+        utils.check_mask(x[:, :, :n_data_dims], mask)
+        mask = mask.clone()
+
         x = self.position_encoder(x, time_steps)
         for layer in self.attention_encoder_layers:
-            x = layer(x)
+            x = layer(x, mask)
         x = self.norm(x)  # shape: [batch_size, n_tp, input_dim]
 
         # Find the mean on all tp.
-        if run_backwards:
-            x = x[:, 0, :]
-        else:
-            x = torch.mean(x, 1)  # [batch_size, input_dim]
+        # if run_backwards:
+        #     x = x[:, 0, :]
+        # else:
+        x = torch.mean(x, 1)  # [batch_size, input_dim]
         x = x.unsqueeze(0)
         x = self.transform_z0(x)
         mean_z0, std_z0 = utils.split_last_dim(x)
@@ -401,7 +413,7 @@ class MultiHeadAttention(nn.Module):
         self.WO = nn.Linear(d_model * nhead, input_dim)
         self.n_tp_split = 192 if use_split else None
 
-    def forward(self, data):
+    def forward(self, data, mask):
         # mask = mask.sum(dim=-1, keepdim=True) == 0.
         # mask = mask.repeat(1, 1, self.input_dim)
         # data = torch.masked_fill(data, mask, 0)
@@ -437,13 +449,13 @@ class MultiHeadAttention(nn.Module):
         else:
             # shape: [batch_size, nhead, n_tp, n_tp]
             scores = torch.matmul(Qs, Ks.permute(0, 1, 3, 2)) / math.sqrt(self.d_model)
-            # if mask is not None:
-            #     # shape: [batch_size, n_tp]. True indicates that there are no observation in the time_point.
-            #     mask = torch.sum(mask, dim=-1) == 0.
-            #     scores = scores.permute(1, 2, 0, 3)
-            #     # make these time points' score very low.
-            #     scores = scores.masked_fill(mask, -1e9)
-            #     scores = scores.permute(2, 0, 1, 3)
+            if mask is not None:
+                # shape: [batch_size, n_tp]. True indicates that there are no observation in the time_point.
+                mask = torch.sum(mask, dim=-1) == 0.
+                scores = scores.permute(1, 2, 0, 3)
+                # make these time points' score very low.
+                scores = scores.masked_fill(mask, -1e9)
+                scores = scores.permute(2, 0, 1, 3)
             scores = F.softmax(scores, dim=-1)
             scores = self.dropout(scores)
             scores = torch.matmul(scores, Vs)
@@ -493,8 +505,8 @@ class EncoderAttentionLayer(nn.Module):
         self.dropout1 = nn.Dropout(dropout)
         self.dropout2 = nn.Dropout(dropout)
 
-    def forward(self, x):
-        x = x + self.dropout1(self.attn(self.norm1(x)))
+    def forward(self, x, mask):
+        x = x + self.dropout1(self.attn(self.norm1(x), mask))
         x = x + self.dropout2(self.feedforward(self.norm2(x)))
         return x
 
@@ -504,8 +516,8 @@ class EncoderMamba(nn.Module):
         super(EncoderMamba, self).__init__()
         self.mamba = Mamba(d_model=input_dim, d_state=d_state, d_conv=d_conv, expand=expand)
         self.mixer_model = MixerModel(
-            d_model=input_dim, 
-            n_layer=12, 
+            d_model=input_dim,
+            n_layer=12,
             ssm_cfg=None,
             rms_norm=True,
             fused_add_norm=True,
@@ -532,17 +544,17 @@ class EncoderMamba(nn.Module):
 
 class MixerModel(nn.Module):
     def __init__(
-        self,
-        d_model: int,
-        n_layer: int,
-        ssm_cfg=None,
-        norm_epsilon: float = 1e-5,
-        rms_norm: bool = False,
-        initializer_cfg=None,
-        fused_add_norm=False,
-        residual_in_fp32=False,
-        device=None,
-        dtype=None,
+            self,
+            d_model: int,
+            n_layer: int,
+            ssm_cfg=None,
+            norm_epsilon: float = 1e-5,
+            rms_norm: bool = False,
+            initializer_cfg=None,
+            fused_add_norm=False,
+            residual_in_fp32=False,
+            device=None,
+            dtype=None,
     ) -> None:
         factory_kwargs = {"device": device, "dtype": dtype}
         super().__init__()
