@@ -374,7 +374,7 @@ class PositionEncoder(nn.Module):
         super(PositionEncoder, self).__init__()
         self.input_dim = input_dim
 
-    def forward(self, data, time_steps):
+    def forward(self, data, mask, time_steps):
         batch_size, n_tp, n_dim = data.size()
         # make embeddings relatively larger
         data = data * math.sqrt(self.input_dim)
@@ -386,10 +386,10 @@ class PositionEncoder(nn.Module):
                 if i == self.input_dim - 1:
                     break
                 pe[pos, i + 1] = torch.cos(time_steps[pos] / (10000 ** (i / n_dim)))
-        pe = pe.unsqueeze(0)
-        # mask = mask.sum(dim=-1, keepdim=True) == 0.
-        # mask = mask.repeat(1, 1, self.input_dim)
-        # pe = torch.masked_fill(pe, mask, 0)
+        pe = pe.repeat(batch_size, 1, 1)
+        mask = mask.sum(dim=-1, keepdim=True) == 0.
+        mask = mask.repeat(1, 1, self.input_dim)
+        pe = torch.masked_fill(pe, mask, 0)
 
         data = data + pe
         # subsample_num = 800
@@ -517,12 +517,13 @@ class EncoderMamba(nn.Module):
         self.mamba = Mamba(d_model=input_dim, d_state=d_state, d_conv=d_conv, expand=expand)
         self.mixer_model = MixerModel(
             d_model=input_dim,
-            n_layer=12,
+            n_layer=24,
             ssm_cfg=None,
             rms_norm=True,
             fused_add_norm=True,
             residual_in_fp32=True
         )
+        self.position_encoder = PositionEncoder(input_dim)
         self.transform_z0 = nn.Sequential(
             nn.Linear(input_dim, 100),
             nn.Tanh(),
@@ -530,10 +531,24 @@ class EncoderMamba(nn.Module):
         utils.init_network_weights(self.transform_z0)
 
     def forward(self, x, time_steps, run_backwards=True):
+        n_data_dims = x.size(-1) // 2
+        mask = x[:, :, n_data_dims:]
+        utils.check_mask(x[:, :, :n_data_dims], mask)
+        mask = mask.clone()
+        x = x[:, :, :n_data_dims]
+        # TODO: How to use the mask?
+
+        x = self.position_encoder(x, mask, time_steps)
+
         if run_backwards:
             x = x.flip(1)
         # x = self.mamba(x)
         x = self.mixer_model(x)
+
+        # mask = mask.sum(dim=-1, keepdim=True) == 0.
+        # mask = mask.repeat(1, 1, n_data_dims)
+        # x = torch.masked_fill(x, mask, 0)
+
         x = x.mean(1)
         x = x.unsqueeze(0)
         x = self.transform_z0(x)

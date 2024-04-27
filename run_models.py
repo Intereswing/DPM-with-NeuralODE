@@ -170,7 +170,7 @@ if __name__ == '__main__':
             ).to(device)
         elif args.encoder == 'mamba':
             encoder = EncoderMamba(
-                input_dim=int(input_dim) * 2,
+                input_dim=int(input_dim),
                 latent_dim=latents,
             ).to(device)
         else:
