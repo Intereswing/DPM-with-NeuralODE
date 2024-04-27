@@ -1,9 +1,20 @@
+from functools import partial
 import math
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.nn import GRU
+
+from mamba_ssm.models.mixer_seq_simple import create_block, _init_weights
+from mamba_ssm.models.config_mamba import MambaConfig
+from mamba_ssm.modules.mamba_simple import Block, Mamba
+from mamba_ssm.utils.generation import GenerationMixin
+from mamba_ssm.utils.hf import load_config_hf, load_state_dict_hf
+try:
+    from mamba_ssm.ops.triton.layernorm import RMSNorm, layer_norm_fn, rms_norm_fn
+except ImportError:
+    RMSNorm, layer_norm_fn, rms_norm_fn = None, None, None
 
 from utils.utils import get_device
 from utils import utils
@@ -485,4 +496,121 @@ class EncoderAttentionLayer(nn.Module):
     def forward(self, x):
         x = x + self.dropout1(self.attn(self.norm1(x)))
         x = x + self.dropout2(self.feedforward(self.norm2(x)))
+        return x
+
+
+class EncoderMamba(nn.Module):
+    def __init__(self, input_dim, latent_dim, d_state=16, d_conv=4, expand=2):
+        super(EncoderMamba, self).__init__()
+        self.mamba = Mamba(d_model=input_dim, d_state=d_state, d_conv=d_conv, expand=expand)
+        self.mixer_model = MixerModel(
+            d_model=input_dim, 
+            n_layer=12, 
+            ssm_cfg=None,
+            rms_norm=True,
+            fused_add_norm=True,
+            residual_in_fp32=True
+        )
+        self.transform_z0 = nn.Sequential(
+            nn.Linear(input_dim, 100),
+            nn.Tanh(),
+            nn.Linear(100, latent_dim * 2), )
+        utils.init_network_weights(self.transform_z0)
+
+    def forward(self, x, time_steps, run_backwards=True):
+        if run_backwards:
+            x = x.flip(1)
+        # x = self.mamba(x)
+        x = self.mixer_model(x)
+        x = x.mean(1)
+        x = x.unsqueeze(0)
+        x = self.transform_z0(x)
+        mean_z0, std_z0 = utils.split_last_dim(x)
+        std_z0 = std_z0.abs()
+        return mean_z0, std_z0
+
+
+class MixerModel(nn.Module):
+    def __init__(
+        self,
+        d_model: int,
+        n_layer: int,
+        ssm_cfg=None,
+        norm_epsilon: float = 1e-5,
+        rms_norm: bool = False,
+        initializer_cfg=None,
+        fused_add_norm=False,
+        residual_in_fp32=False,
+        device=None,
+        dtype=None,
+    ) -> None:
+        factory_kwargs = {"device": device, "dtype": dtype}
+        super().__init__()
+        self.residual_in_fp32 = residual_in_fp32
+
+        # We change the order of residual and layer norm:
+        # Instead of LN -> Attn / MLP -> Add, we do:
+        # Add -> LN -> Attn / MLP / Mixer, returning both the residual branch (output of Add) and
+        # the main branch (output of MLP / Mixer). The model definition is unchanged.
+        # This is for performance reason: we can fuse add + layer_norm.
+        self.fused_add_norm = fused_add_norm
+        if self.fused_add_norm:
+            if layer_norm_fn is None or rms_norm_fn is None:
+                raise ImportError("Failed to import Triton LayerNorm / RMSNorm kernels")
+
+        self.layers = nn.ModuleList(
+            [
+                create_block(
+                    d_model,
+                    ssm_cfg=ssm_cfg,
+                    norm_epsilon=norm_epsilon,
+                    rms_norm=rms_norm,
+                    residual_in_fp32=residual_in_fp32,
+                    fused_add_norm=fused_add_norm,
+                    layer_idx=i,
+                    **factory_kwargs,
+                )
+                for i in range(n_layer)
+            ]
+        )
+
+        self.norm_f = (nn.LayerNorm if not rms_norm else RMSNorm)(
+            d_model, eps=norm_epsilon, **factory_kwargs
+        )
+
+        self.apply(
+            partial(
+                _init_weights,
+                n_layer=n_layer,
+                **(initializer_cfg if initializer_cfg is not None else {}),
+            )
+        )
+
+    def allocate_inference_cache(self, batch_size, max_seqlen, dtype=None, **kwargs):
+        return {
+            i: layer.allocate_inference_cache(batch_size, max_seqlen, dtype=dtype, **kwargs)
+            for i, layer in enumerate(self.layers)
+        }
+
+    def forward(self, x, inference_params=None):
+        residual = None
+        for layer in self.layers:
+            x, residual = layer(
+                x, residual, inference_params=inference_params
+            )
+        if not self.fused_add_norm:
+            residual = (x + residual) if residual is not None else x
+            x = self.norm_f(residual.to(dtype=self.norm_f.weight.dtype))
+        else:
+            # Set prenorm=False here since we don't need the residual
+            fused_add_norm_fn = rms_norm_fn if isinstance(self.norm_f, RMSNorm) else layer_norm_fn
+            x = fused_add_norm_fn(
+                x,
+                self.norm_f.weight,
+                self.norm_f.bias,
+                eps=self.norm_f.eps,
+                residual=residual,
+                prenorm=False,
+                residual_in_fp32=self.residual_in_fp32,
+            )
         return x

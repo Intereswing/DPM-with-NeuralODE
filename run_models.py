@@ -17,7 +17,7 @@ from torch.distributions.normal import Normal
 
 from model.vae import VAE
 from model.decoder import ODEFunc, DiffeqSolver, DiffeqSolverDecoder
-from model.encoder import Encoder_z0_ODE_RNN, EncoderAttention, Encoder_z0_RNN
+from model.encoder import Encoder_z0_ODE_RNN, EncoderAttention, Encoder_z0_RNN, EncoderMamba
 from model.classifier import Classifier
 from model.loss import IWAE_reconstruction_loss, compute_binary_CE_loss
 from utils import utils
@@ -169,7 +169,10 @@ if __name__ == '__main__':
                 use_split=False
             ).to(device)
         elif args.encoder == 'mamba':
-            raise NotImplementedError('Not implemented yet')
+            encoder = EncoderMamba(
+                input_dim=int(input_dim) * 2,
+                latent_dim=latents,
+            ).to(device)
         else:
             raise Exception('Please provide a valid encoder type')
         dec_ode_func = ODEFunc(latents, gen_layers, units, nonlinear=nn.Tanh).to(device)
