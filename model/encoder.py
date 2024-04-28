@@ -392,6 +392,8 @@ class EncoderAttention(nn.Module):
         x = self.transform_z0(x)
         mean_z0, std_z0 = utils.split_last_dim(x)
         std_z0 = std_z0.abs()
+        std_z0 = torch.clamp(std_z0, min=1e-20)
+
         return mean_z0, std_z0
 
 
@@ -550,7 +552,7 @@ class EncoderMamba(nn.Module):
         self.mamba = Mamba(d_model=input_dim, d_state=d_state, d_conv=d_conv, expand=expand)
         self.mixer_model = MixerModel(
             d_model=input_dim,
-            n_layer=24,
+            n_layer=12,
             ssm_cfg=None,
             rms_norm=True,
             fused_add_norm=True,
@@ -558,11 +560,15 @@ class EncoderMamba(nn.Module):
         )
         self.position_encoder = PositionEncoder(input_dim)
         self.max_length = max_length
-        self.transform_tp = nn.Sequential(
-            nn.Linear(max_length, max_length // 2),
-            nn.Tanh(),
-            nn.Linear(max_length // 2, 1),
-        )
+        # self.transform_tp = nn.Sequential(
+        #     nn.Linear(max_length, max_length // 2),
+        #     nn.Tanh(),
+        #     nn.Linear(max_length // 2, 1),
+        # )
+        self.transform_tp = nn.Linear(max_length, 1)
+        self.transform_tp.weight.data.fill_(1 / max_length)
+        self.transform_tp.bias.data.fill_(0)
+
         self.transform_z0 = nn.Sequential(
             nn.Linear(input_dim, 100),
             nn.Tanh(),
@@ -587,8 +593,9 @@ class EncoderMamba(nn.Module):
         x = torch.cat((x, padding), dim=1)
         mask = torch.cat((mask, padding), dim=1)
 
-        if run_backwards:
-            x = x.flip(1)
+        # Dont't use backwards.
+        # if run_backwards:
+        #     x = x.flip(1)
         # x = self.mamba(x)
         x = self.mixer_model(x)
 
@@ -605,6 +612,8 @@ class EncoderMamba(nn.Module):
         x = self.transform_z0(x)
         mean_z0, std_z0 = utils.split_last_dim(x)
         std_z0 = std_z0.abs()
+        std_z0 = torch.clamp(std_z0, min=1e-20)
+
         return mean_z0, std_z0
 
 
