@@ -455,11 +455,11 @@ class MultiHeadAttention(nn.Module):
         Ks = Ks.reshape(batch_size, n_tp, self.d_model, self.nhead)
         Vs = Vs.reshape(batch_size, n_tp, self.d_model, self.nhead)
 
-        # shape: [batch_size, nhead, n_tp, d_model]
-        Qs = Qs.permute(0, 3, 1, 2)
-        Ks = Ks.permute(0, 3, 1, 2)
-        Vs = Vs.permute(0, 3, 1, 2)
+        Qs = Qs.permute(0, 3, 1, 2)  # [batch_size, nhead, n_tp, d_model]
+        Ks = Ks.permute(0, 3, 2, 1)  # [batch_size, nhead, d_model, n_tp]
+        Vs = Vs.permute(0, 3, 1, 2)  # [batch_size, nhead, n_tp, d_model]
 
+        # Not care when n_tp_split is not None.
         if self.n_tp_split is not None:
             scores = []
             for i in range(0, n_tp, self.n_tp_split):
@@ -476,7 +476,7 @@ class MultiHeadAttention(nn.Module):
             scores = torch.cat(scores, dim=-2)
         else:
             # shape: [batch_size, nhead, n_tp, n_tp]
-            scores = torch.matmul(Qs, Ks.permute(0, 1, 3, 2)) / math.sqrt(self.d_model)
+            scores = torch.matmul(Qs, Ks) / math.sqrt(self.d_model)
             if mask is not None:
                 # shape: [batch_size, n_tp]. True indicates that there are no observation in the time_point.
                 mask = torch.sum(mask, dim=-1) == 0.
@@ -540,7 +540,7 @@ class EncoderAttentionLayer(nn.Module):
 
 
 class EncoderMamba(nn.Module):
-    def __init__(self, input_dim, latent_dim, d_state=16, d_conv=4, expand=2):
+    def __init__(self, input_dim, latent_dim, max_length, d_state=16, d_conv=4, expand=2):
         super(EncoderMamba, self).__init__()
         self.mamba = Mamba(d_model=input_dim, d_state=d_state, d_conv=d_conv, expand=expand)
         self.mixer_model = MixerModel(
@@ -552,6 +552,12 @@ class EncoderMamba(nn.Module):
             residual_in_fp32=True
         )
         self.position_encoder = PositionEncoder(input_dim)
+        self.max_length = max_length
+        self.transform_tp = nn.Sequential(
+            nn.Linear(max_length, max_length // 2),
+            nn.Tanh(),
+            nn.Linear(max_length // 2, 1),
+        )
         self.transform_z0 = nn.Sequential(
             nn.Linear(input_dim, 100),
             nn.Tanh(),
@@ -559,14 +565,22 @@ class EncoderMamba(nn.Module):
         utils.init_network_weights(self.transform_z0)
 
     def forward(self, x, time_steps, run_backwards=True):
-        n_data_dims = x.size(-1) // 2
+        device = utils.get_device(time_steps)
+        batch_size, n_tp, input_dim = x.size()
+        n_data_dims = input_dim // 2
         mask = x[:, :, n_data_dims:]
         utils.check_mask(x[:, :, :n_data_dims], mask)
         mask = mask.clone()
         x = x[:, :, :n_data_dims]
         # TODO: How to use the mask?
 
-        # x = self.position_encoder(x, mask, time_steps)
+        x = self.position_encoder(x, mask, time_steps)
+
+        # padding
+        assert self.max_length >= n_tp, f"max_length {self.max_length} must be larger than or equal n_tp {n_tp}"
+        padding = torch.zeros(batch_size, self.max_length - n_tp, n_data_dims).to(device)
+        x = torch.cat((x, padding), dim=1)
+        mask = torch.cat((mask, padding), dim=1)
 
         if run_backwards:
             x = x.flip(1)
@@ -577,7 +591,11 @@ class EncoderMamba(nn.Module):
         # mask = mask.repeat(1, 1, n_data_dims)
         # x = torch.masked_fill(x, mask, 0)
 
-        x = x.mean(1)
+        # x = x.mean(1)
+        x = x.permute(0, 2, 1)  # [batch_size, input_dim, n_tp]
+        x = self.transform_tp(x)  # [batch_size, input_dim, 1]
+        x = x.squeeze(-1)
+
         x = x.unsqueeze(0)
         x = self.transform_z0(x)
         mean_z0, std_z0 = utils.split_last_dim(x)

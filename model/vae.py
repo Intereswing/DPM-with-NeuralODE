@@ -36,7 +36,7 @@ class VAE(nn.Module):
                 labels_prediction = self.classifier(first_point_enc).squeeze(-1)
             ce_loss = compute_binary_CE_loss(labels_prediction, batch_dict['labels'])
             if self.train_classif_w_reconstr:
-                loss = loss + ce_loss * 30
+                loss = loss + ce_loss * 10
             else:
                 loss = ce_loss
 

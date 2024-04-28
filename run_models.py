@@ -174,6 +174,7 @@ if __name__ == '__main__':
             encoder = EncoderMamba(
                 input_dim=int(input_dim),
                 latent_dim=latents,
+                max_length=math.ceil(48 / args.quantization) + 1
             ).to(device)
         else:
             raise Exception('Please provide a valid encoder type')
