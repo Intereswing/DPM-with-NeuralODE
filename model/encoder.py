@@ -414,8 +414,9 @@ class PositionEncoder(nn.Module):
             pe[:, 1::2] = torch.cos(time_steps * div_term[:-1])
 
         pe = pe.repeat(batch_size, 1, 1)
-        # mask = mask.repeat(1, 1, 2)
-        mask = mask == 0.
+        mask = mask.sum(-1, keepdim=True) == 0.
+        mask = mask.repeat(1, 1, n_dim)
+        # only mask the tp when no observation is taken.
         pe = torch.masked_fill(pe, mask, 0)
 
         data = data + pe
