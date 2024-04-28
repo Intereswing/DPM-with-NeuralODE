@@ -336,11 +336,16 @@ class EncoderAttention(nn.Module):
              for _ in range(num_layers)])
         self.norm = Norm(input_dim)
         self.max_length = max_length
-        self.transform_tp = nn.Sequential(
-            nn.Linear(max_length, max_length // 2),
-            nn.Tanh(),
-            nn.Linear(max_length // 2, 1),
-        )
+        # self.transform_tp = nn.Sequential(
+        #     nn.Linear(max_length, max_length // 2),
+        #     nn.Tanh(),
+        #     nn.Linear(max_length // 2, 1),
+        # )
+        # initialize transform tp to mean.
+        self.transform_tp = nn.Linear(max_length, 1)
+        self.transform_tp.weight.data.fill_(1 / max_length)
+        self.transform_tp.bias.data.fill_(0)
+
         self.transform_z0 = nn.Sequential(
             nn.Linear(input_dim, 100),
             nn.Tanh(),
