@@ -326,7 +326,8 @@ class Encoder_z0_RNN(nn.Module):
 
 
 class EncoderAttention(nn.Module):
-    def __init__(self, input_dim, d_model, nhead, d_ff, num_layers, latent_dim, dropout=0.1, use_split=False):
+    def __init__(self, input_dim, d_model, nhead, d_ff, num_layers, latent_dim, max_length,
+                 dropout=0.1, use_split=False):
         super(EncoderAttention, self).__init__()
         self.position_encoder = PositionEncoder(input_dim)
         self.num_layers = num_layers
@@ -334,6 +335,12 @@ class EncoderAttention(nn.Module):
             [EncoderAttentionLayer(input_dim, d_model, nhead, d_ff, dropout=dropout, use_split=use_split)
              for _ in range(num_layers)])
         self.norm = Norm(input_dim)
+        self.max_length = max_length
+        self.transform_tp = nn.Sequential(
+            nn.Linear(max_length, max_length // 2),
+            nn.Tanh(),
+            nn.Linear(max_length // 2, 1),
+        )
         self.transform_z0 = nn.Sequential(
             nn.Linear(input_dim, 100),
             nn.Tanh(),
@@ -347,12 +354,22 @@ class EncoderAttention(nn.Module):
         :param run_backwards:
         :return:
         """
-        n_data_dims = x.size(-1) // 2
+        device = utils.get_device(time_steps)
+        batch_size, n_tp, input_dim = x.size()
+        n_data_dims = input_dim // 2
         mask = x[:, :, n_data_dims:]
         utils.check_mask(x[:, :, :n_data_dims], mask)
         mask = mask.clone()
+        x = x[:, :, :n_data_dims]
 
-        x = self.position_encoder(x, time_steps)
+        x = self.position_encoder(x, mask, time_steps)
+
+        assert self.max_length >= n_tp, f"max_length {self.max_length} must be larger than or equal n_tp {n_tp}"
+        # padding
+        padding = torch.zeros(batch_size, self.max_length - n_tp, n_data_dims).to(device)
+        x = torch.cat((x, padding), dim=1)
+        mask = torch.cat((mask, padding), dim=1)
+
         for layer in self.attention_encoder_layers:
             x = layer(x, mask)
         x = self.norm(x)  # shape: [batch_size, n_tp, input_dim]
@@ -361,7 +378,11 @@ class EncoderAttention(nn.Module):
         # if run_backwards:
         #     x = x[:, 0, :]
         # else:
-        x = torch.mean(x, 1)  # [batch_size, input_dim]
+        # x = torch.mean(x, 1)  # [batch_size, input_dim]
+        x = x.permute(0, 2, 1)  # [batch_size, input_dim, n_tp]
+        x = self.transform_tp(x)  # [batch_size, input_dim, 1]
+        x = x.squeeze(-1)
+
         x = x.unsqueeze(0)
         x = self.transform_z0(x)
         mean_z0, std_z0 = utils.split_last_dim(x)
@@ -380,15 +401,21 @@ class PositionEncoder(nn.Module):
         data = data * math.sqrt(self.input_dim)
 
         pe = torch.zeros(n_tp, n_dim, requires_grad=False).to(get_device(data))
-        for pos in range(n_tp):
-            for i in range(0, n_dim, 2):
-                pe[pos, i] = torch.sin((time_steps[pos] * 48) / (10000 ** (i / n_dim)))
-                if i == self.input_dim - 1:
-                    break
-                pe[pos, i +  1]= torch.cos((time_steps[pos] * 48) / (10000 ** (i / n_dim)))
+        time_steps = time_steps.unsqueeze(1) * 48
+        div_term = torch.exp(
+            torch.arange(0, self.input_dim, 2, device=utils.get_device(time_steps))
+            * -(math.log(10000.0) / self.input_dim)
+        )
+
+        pe[:, 0::2] = torch.sin(time_steps * div_term)
+        if n_dim % 2 == 0:
+            pe[:, 1::2] = torch.cos(time_steps * div_term)
+        else:
+            pe[:, 1::2] = torch.cos(time_steps * div_term[:-1])
+
         pe = pe.repeat(batch_size, 1, 1)
-        mask = mask.sum(dim=-1, keepdim=True) == 0.
-        mask = mask.repeat(1, 1, self.input_dim)
+        # mask = mask.repeat(1, 1, 2)
+        mask = mask == 0.
         pe = torch.masked_fill(pe, mask, 0)
 
         data = data + pe
@@ -454,7 +481,7 @@ class MultiHeadAttention(nn.Module):
                 mask = torch.sum(mask, dim=-1) == 0.
                 scores = scores.permute(1, 2, 0, 3)
                 # make these time points' score very low.
-                scores = scores.masked_fill(mask, -1e9)
+                scores = scores.masked_fill(mask, -1e10)
                 scores = scores.permute(2, 0, 1, 3)
             scores = F.softmax(scores, dim=-1)
             scores = self.dropout(scores)
