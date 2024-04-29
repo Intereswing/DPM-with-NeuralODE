@@ -365,15 +365,15 @@ class EncoderAttention(nn.Module):
         mask = x[:, :, n_data_dims:]
         utils.check_mask(x[:, :, :n_data_dims], mask)
         mask = mask.clone()
-        x = x[:, :, :n_data_dims]
+        # x = x[:, :, :n_data_dims]
 
         x = self.position_encoder(x, mask, time_steps)
 
-        assert self.max_length >= n_tp, f"max_length {self.max_length} must be larger than or equal n_tp {n_tp}"
-        # padding
-        padding = torch.zeros(batch_size, self.max_length - n_tp, n_data_dims).to(device)
-        x = torch.cat((x, padding), dim=1)
-        mask = torch.cat((mask, padding), dim=1)
+        # assert self.max_length >= n_tp, f"max_length {self.max_length} must be larger than or equal n_tp {n_tp}"
+        # # padding
+        # padding = torch.zeros(batch_size, self.max_length - n_tp, n_data_dims).to(device)
+        # x = torch.cat((x, padding), dim=1)
+        # mask = torch.cat((mask, padding), dim=1)
 
         for layer in self.attention_encoder_layers:
             x = layer(x, mask)
@@ -383,10 +383,10 @@ class EncoderAttention(nn.Module):
         # if run_backwards:
         #     x = x[:, 0, :]
         # else:
-        # x = torch.mean(x, 1)  # [batch_size, input_dim]
-        x = x.permute(0, 2, 1)  # [batch_size, input_dim, n_tp]
-        x = self.transform_tp(x)  # [batch_size, input_dim, 1]
-        x = x.squeeze(-1)
+        x = torch.mean(x, 1)  # [batch_size, input_dim]
+        # x = x.permute(0, 2, 1)  # [batch_size, input_dim, n_tp]
+        # x = self.transform_tp(x)  # [batch_size, input_dim, 1]
+        # x = x.squeeze(-1)
 
         x = x.unsqueeze(0)
         x = self.transform_z0(x)

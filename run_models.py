@@ -160,11 +160,11 @@ if __name__ == '__main__':
                                          z0_dim=latents, n_gru_units=args.gru_units).to(device)
         elif args.encoder == 'attn':
             encoder = EncoderAttention(
-                input_dim=int(input_dim),
-                d_model=64,
+                input_dim=int(input_dim) * 2,
+                d_model=128,
                 nhead=8,
-                d_ff=512,
-                num_layers=7,
+                d_ff=1024,
+                num_layers=6,
                 latent_dim=latents,
                 max_length=math.ceil(48 / args.quantization) + 1,
                 dropout=0.5,
