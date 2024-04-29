@@ -18,7 +18,7 @@ from torch.distributions.normal import Normal
 
 from model.vae import VAE
 from model.decoder import ODEFunc, DiffeqSolver, DiffeqSolverDecoder
-from model.encoder import Encoder_z0_ODE_RNN, EncoderAttention, Encoder_z0_RNN, EncoderMamba
+from model.encoder import Encoder_z0_ODE_RNN, EncoderAttention, Encoder_z0_RNN, EncoderMamba, mamba_unit
 from model.classifier import Classifier
 from model.loss import IWAE_reconstruction_loss, compute_binary_CE_loss
 from utils import utils
@@ -149,6 +149,7 @@ if __name__ == '__main__':
         gen_layers = args.gen_layers
         units = args.units
         rec_dims = args.rec_dims
+        gru_units = args.gru_units
 
         if args.encoder == 'rnn':
             encoder = Encoder_z0_RNN(latents, int(input_dim) * 2,
@@ -157,7 +158,7 @@ if __name__ == '__main__':
             rec_ode_func = ODEFunc(rec_dims, args.rec_layers, units, nonlinear=nn.Tanh).to(device)
             z0_diffeq_solver = DiffeqSolver(rec_ode_func, 'euler', odeint_rtol=1e-3, odeint_atol=1e-4).to(device)
             encoder = Encoder_z0_ODE_RNN(rec_dims, int(input_dim) * 2, z0_diffeq_solver,
-                                         z0_dim=latents, n_gru_units=args.gru_units).to(device)
+                                         z0_dim=latents, n_gru_units=gru_units).to(device)
         elif args.encoder == 'attn':
             encoder = EncoderAttention(
                 input_dim=int(input_dim) * 2,
@@ -171,11 +172,17 @@ if __name__ == '__main__':
                 use_split=False
             ).to(device)
         elif args.encoder == 'mamba':
-            encoder = EncoderMamba(
-                input_dim=int(input_dim),
-                latent_dim=latents,
-                max_length=math.ceil(48 / args.quantization) + 1
-            ).to(device)
+            rec_ode_func = ODEFunc(rec_dims, args.rec_layers, units, nonlinear=nn.Tanh).to(device)
+            z0_diffeq_solver = DiffeqSolver(rec_ode_func, 'euler', odeint_rtol=1e-3, odeint_atol=1e-4).to(device)
+            mamba_update = mamba_unit(rec_dims, int(input_dim) * 2, n_units=gru_units).to(device)
+            encoder = Encoder_z0_ODE_RNN(rec_dims, int(input_dim) * 2, z0_diffeq_solver,
+                                         z0_dim=latents, GRU_update=mamba_update).to(device)
+
+            # encoder = EncoderMamba(
+            #     input_dim=int(input_dim),
+            #     latent_dim=latents,
+            #     max_length=math.ceil(48 / args.quantization) + 1
+            # ).to(device)
         else:
             raise Exception('Please provide a valid encoder type')
         dec_ode_func = ODEFunc(latents, gen_layers, units, nonlinear=nn.Tanh).to(device)

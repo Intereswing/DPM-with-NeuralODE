@@ -106,10 +106,47 @@ class GRU_unit(nn.Module):
 
 
 class mamba_unit(nn.Module):
-    def __init__(self, latent_dim, input_dim, n_units=100, d_state=16, d_conv=4, expand=2):
+    def __init__(self, latent_dim, input_dim, n_units=100, new_state_net=None, d_state=16, d_conv=4, expand=2):
         super(mamba_unit, self).__init__()
-        self.mamba = Mamba()
+        self.mamba = Mamba(d_model=2 * latent_dim + input_dim, d_state=d_state, d_conv=d_conv, expand=expand)
+        if new_state_net is None:
+            self.new_state_net = nn.Sequential(
+                nn.Linear(latent_dim * 2 + input_dim, n_units),
+                nn.Tanh(),
+                nn.Linear(n_units, latent_dim * 2))
+            utils.init_network_weights(self.new_state_net)
+        else:
+            self.new_state_net = new_state_net
 
+    def forward(self, y_mean, y_std, x, masked_update=True):
+        y_concat = torch.cat([y_mean, y_std, x], -1)  # [1, B, rec * 2 + input]
+        y_concat = y_concat.permute(1, 0, 2)  # [B, 1, rec * 2 + input]
+        y_concat = self.mamba(y_concat)
+        y_concat = y_concat.permute(1, 0, 2)
+        new_y, new_y_std = utils.split_last_dim(self.new_state_net(y_concat))
+        if masked_update:
+            # IMPORTANT: assumes that x contains both data and mask
+            # update only the hidden states for hidden state only if at least one feature is present for the
+            # current time point
+            n_data_dims = x.size(-1) // 2
+            mask = x[:, :, n_data_dims:]
+            utils.check_mask(x[:, :, :n_data_dims], mask)
+
+            mask = (torch.sum(mask, -1, keepdim=True) > 0).float()
+
+            assert (not torch.isnan(mask).any())
+
+            new_y = mask * new_y + (1 - mask) * y_mean
+            new_y_std = mask * new_y_std + (1 - mask) * y_std
+
+            if torch.isnan(new_y).any():
+                print("new_y is nan!")
+                print(mask)
+                print(y_mean)
+                exit()
+
+        new_y_std = new_y_std.abs()
+        return new_y, new_y_std
 
 
 class Encoder_z0_ODE_RNN(nn.Module):
