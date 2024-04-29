@@ -105,6 +105,13 @@ class GRU_unit(nn.Module):
         return new_y, new_y_std
 
 
+class mamba_unit(nn.Module):
+    def __init__(self, latent_dim, input_dim, n_units=100, d_state=16, d_conv=4, expand=2):
+        super(mamba_unit, self).__init__()
+        self.mamba = Mamba()
+
+
+
 class Encoder_z0_ODE_RNN(nn.Module):
     # Derive z0 by running ode backwards.
     # For every y_i we have two versions: encoded from data and derived from ODE by running it backwards
@@ -420,11 +427,12 @@ class PositionEncoder(nn.Module):
         else:
             pe[:, 1::2] = torch.cos(time_steps * div_term[:-1])
 
-        pe = pe.repeat(batch_size, 1, 1)
-        mask = mask.sum(-1, keepdim=True) == 0.
-        mask = mask.repeat(1, 1, n_dim)
-        # only mask the tp when no observation is taken.
-        pe = torch.masked_fill(pe, mask, 0)
+        pe = pe.unsqueeze(0)
+        # pe = pe.repeat(batch_size, 1, 1)
+        # mask = mask.sum(-1, keepdim=True) == 0.
+        # mask = mask.repeat(1, 1, n_dim)
+        # # only mask the tp when no observation is taken.
+        # pe = torch.masked_fill(pe, mask, 0)
 
         data = data + pe
         # subsample_num = 800
