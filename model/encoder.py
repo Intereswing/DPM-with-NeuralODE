@@ -587,26 +587,26 @@ class EncoderMamba(nn.Module):
 
         x = self.position_encoder(x, mask, time_steps)
 
-        # padding
-        assert self.max_length >= n_tp, f"max_length {self.max_length} must be larger than or equal n_tp {n_tp}"
-        padding = torch.zeros(batch_size, self.max_length - n_tp, n_data_dims).to(device)
-        x = torch.cat((x, padding), dim=1)
-        mask = torch.cat((mask, padding), dim=1)
+        # # padding
+        # assert self.max_length >= n_tp, f"max_length {self.max_length} must be larger than or equal n_tp {n_tp}"
+        # padding = torch.zeros(batch_size, self.max_length - n_tp, n_data_dims).to(device)
+        # x = torch.cat((x, padding), dim=1)
+        # mask = torch.cat((mask, padding), dim=1)
 
         # Dont't use backwards.
         # if run_backwards:
         #     x = x.flip(1)
         # x = self.mamba(x)
-        x = self.mixer_model(x)
+        x = self.mixer_model(x)  # [batch_size, n_tp, input_dim]
 
         # mask = mask.sum(dim=-1, keepdim=True) == 0.
         # mask = mask.repeat(1, 1, n_data_dims)
         # x = torch.masked_fill(x, mask, 0)
 
-        # x = x.mean(1)
-        x = x.permute(0, 2, 1)  # [batch_size, input_dim, n_tp]
-        x = self.transform_tp(x)  # [batch_size, input_dim, 1]
-        x = x.squeeze(-1)
+        x = x.mean(1)
+        # x = x.permute(0, 2, 1)  # [batch_size, input_dim, n_tp]
+        # x = self.transform_tp(x)  # [batch_size, input_dim, 1]
+        # x = x.squeeze(-1)
 
         x = x.unsqueeze(0)
         x = self.transform_z0(x)
