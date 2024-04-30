@@ -149,6 +149,81 @@ class mamba_unit(nn.Module):
         return new_y, new_y_std
 
 
+class LSTM_unit(nn.Module):
+    def __init__(self, latent_dim, input_dim, n_units=100):
+        super(LSTM_unit, self).__init__()
+        self.forget_gate = nn.Sequential(
+            nn.Linear(input_dim + latent_dim * 2, n_units),
+            nn.Tanh(),
+            nn.Linear(n_units, latent_dim),
+            nn.Sigmoid()
+        )
+        utils.init_network_weights(self.forget_gate)
+
+        self.input_gate = nn.Sequential(
+            nn.Linear(input_dim + latent_dim * 2, n_units),
+            nn.Tanh(),
+            nn.Linear(n_units, latent_dim),
+            nn.Sigmoid()
+        )
+        utils.init_network_weights(self.input_gate)
+
+        self.Gate_gate = nn.Sequential(
+            nn.Linear(input_dim + latent_dim * 2, n_units),
+            nn.Tanh(),
+            nn.Linear(n_units, latent_dim),
+            nn.Tanh()
+        )
+        utils.init_network_weights(self.Gate_gate)
+
+        self.output_gate = nn.Sequential(
+            nn.Linear(input_dim + latent_dim * 2, latent_dim * 2),
+            nn.Tanh(),
+            nn.Linear(n_units, latent_dim * 2),
+        )
+        utils.init_network_weights(self.output_gate)
+
+    def forward(self, y_mean, y_std, x, cell, masked_update=True):
+        y_concat = torch.cat([y_mean, y_std, x], -1)
+        f_t = self.forget_gate(y_concat)
+        cell_prime = f_t * cell
+
+        i_t = self.input_gate(y_concat)
+        C_t = self.Gate_gate(y_concat)
+        new_cell = cell_prime + i_t * C_t
+
+        o_t = self.output_gate(y_concat)
+        new_y, new_y_std = utils.split_last_dim(o_t)
+        new_y = new_y * F.tanh(new_cell)
+        new_y_std = new_y_std * F.tanh(new_cell)
+
+        assert (not torch.isnan(new_y).any())
+        if masked_update:
+            # IMPORTANT: assumes that x contains both data and mask
+            # update only the hidden states for hidden state only if at least one feature is present for the
+            # current time point
+            n_data_dims = x.size(-1) // 2
+            mask = x[:, :, n_data_dims:]
+            utils.check_mask(x[:, :, :n_data_dims], mask)
+
+            mask = (torch.sum(mask, -1, keepdim=True) > 0).float()
+
+            assert (not torch.isnan(mask).any())
+
+            new_y = mask * new_y + (1 - mask) * y_mean
+            new_y_std = mask * new_y_std + (1 - mask) * y_std
+            new_cell = mask * new_cell + (1 - mask) * cell
+
+            if torch.isnan(new_y).any():
+                print("new_y is nan!")
+                print(mask)
+                print(y_mean)
+                exit()
+
+        new_y_std = new_y_std.abs()
+        return new_y, new_y_std, new_cell
+
+
 class Encoder_z0_ODE_RNN(nn.Module):
     # Derive z0 by running ode backwards.
     # For every y_i we have two versions: encoded from data and derived from ODE by running it backwards
@@ -159,6 +234,7 @@ class Encoder_z0_ODE_RNN(nn.Module):
     def __init__(self, latent_dim, input_dim, z0_diffeq_solver=None,
                  z0_dim=None, GRU_update=None,
                  n_gru_units=100,
+                 use_lstm=False,
                  device=torch.device("cpu")):
 
         super(Encoder_z0_ODE_RNN, self).__init__()
@@ -180,6 +256,7 @@ class Encoder_z0_ODE_RNN(nn.Module):
         self.input_dim = input_dim
         self.device = device
         self.extra_info = None
+        self.use_lstm = use_lstm
 
         self.transform_z0 = nn.Sequential(
             nn.Linear(latent_dim * 2, 100),
@@ -200,7 +277,11 @@ class Encoder_z0_ODE_RNN(nn.Module):
 
             xi = data[:, 0, :].unsqueeze(0)
 
-            last_yi, last_yi_std = self.GRU_update(prev_y, prev_std, xi)
+            if self.use_lstm:
+                prev_cell = torch.zeros((1, n_traj, self.latent_dim)).to(self.device)
+                last_yi, last_yi_std, _ = self.GRU_update(prev_y, prev_std, xi, prev_cell)
+            else:
+                last_yi, last_yi_std = self.GRU_update(prev_y, prev_std, xi)
             extra_info = None
         else:
 
@@ -232,6 +313,7 @@ class Encoder_z0_ODE_RNN(nn.Module):
 
         prev_y = torch.zeros((1, n_traj, self.latent_dim)).to(device)
         prev_std = torch.zeros((1, n_traj, self.latent_dim)).to(device)
+        prev_cell = torch.zeros((1, n_traj, self.latent_dim)).to(device)
 
         prev_t, t_i = time_steps[-1] + 0.01, time_steps[-1]
 
@@ -280,9 +362,13 @@ class Encoder_z0_ODE_RNN(nn.Module):
             yi_ode = ode_sol[:, :, -1, :]
             xi = data[:, i, :].unsqueeze(0)
 
-            yi, yi_std = self.GRU_update(yi_ode, prev_std, xi)
+            if self.use_lstm:
+                yi, yi_std, cell = self.GRU_update(yi_ode, prev_std, xi, prev_cell)
+                prev_y, prev_std, prev_cell = yi, yi_std, cell
+            else:
+                yi, yi_std = self.GRU_update(yi_ode, prev_std, xi)
+                prev_y, prev_std = yi, yi_std
 
-            prev_y, prev_std = yi, yi_std
             prev_t, t_i = time_steps[i], time_steps[i - 1]
 
             latent_ys.append(yi)
@@ -398,7 +484,7 @@ class EncoderAttention(nn.Module):
 
     def forward(self, x, time_steps, run_backwards=True):
         """
-        :param x: [batch_size, n_tp, input_dim]
+        :param x: [batch_size, n_tp, input_dim * 2]
         :param time_steps: [n_tp]
         :param run_backwards:
         :return:
@@ -409,7 +495,7 @@ class EncoderAttention(nn.Module):
         mask = x[:, :, n_data_dims:]
         utils.check_mask(x[:, :, :n_data_dims], mask)
         mask = mask.clone()
-        # x = x[:, :, :n_data_dims]
+        x = x[:, :, :n_data_dims]
 
         x = self.position_encoder(x, mask, time_steps)
 
@@ -452,9 +538,9 @@ class PositionEncoder(nn.Module):
         data = data * math.sqrt(self.input_dim)
 
         pe = torch.zeros(n_tp, n_dim, requires_grad=False).to(get_device(data))
-        time_steps = time_steps.unsqueeze(1) * 48
+        time_steps = time_steps.unsqueeze(1)
         div_term = torch.exp(
-            torch.arange(0, self.input_dim, 2, device=utils.get_device(time_steps))
+            torch.arange(0, self.input_dim * 2, 4, device=utils.get_device(time_steps))
             * -(math.log(10000.0) / self.input_dim)
         )
 
@@ -465,11 +551,11 @@ class PositionEncoder(nn.Module):
             pe[:, 1::2] = torch.cos(time_steps * div_term[:-1])
 
         pe = pe.unsqueeze(0)
-        # pe = pe.repeat(batch_size, 1, 1)
-        # mask = mask.sum(-1, keepdim=True) == 0.
-        # mask = mask.repeat(1, 1, n_dim)
-        # # only mask the tp when no observation is taken.
-        # pe = torch.masked_fill(pe, mask, 0)
+        pe = pe.repeat(batch_size, 1, 1)
+        mask = mask.sum(-1, keepdim=True) == 0.
+        mask = mask.repeat(1, 1, n_dim)
+        # only mask the tp when no observation is taken.
+        pe = torch.masked_fill(pe, mask, 0)
 
         data = data + pe
         # subsample_num = 800
@@ -534,7 +620,7 @@ class MultiHeadAttention(nn.Module):
                 mask = torch.sum(mask, dim=-1) == 0.
                 scores = scores.permute(1, 2, 0, 3)
                 # make these time points' score very low.
-                scores = scores.masked_fill(mask, -1e10)
+                scores = scores.masked_fill(mask, -1e9)
                 scores = scores.permute(2, 0, 1, 3)
             scores = F.softmax(scores, dim=-1)
             scores = self.dropout(scores)
