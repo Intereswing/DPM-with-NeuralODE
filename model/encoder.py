@@ -108,22 +108,51 @@ class GRU_unit(nn.Module):
 class mamba_unit(nn.Module):
     def __init__(self, latent_dim, input_dim, n_units=100, new_state_net=None, d_state=16, d_conv=4, expand=2):
         super(mamba_unit, self).__init__()
-        self.mamba = Mamba(d_model=2 * latent_dim + input_dim, d_state=d_state, d_conv=d_conv, expand=expand)
+        self.d_state = d_state
+        self.d_conv = d_conv
+        self.expand = expand
+        self.mamba = Mamba(input_dim, d_state=d_state, d_conv=d_conv, expand=expand)
         if new_state_net is None:
             self.new_state_net = nn.Sequential(
-                nn.Linear(latent_dim * 2 + input_dim, n_units),
+                nn.Linear(input_dim * expand * d_state, input_dim * expand * d_state // 2),
+                nn.Tanh(),
+                nn.Linear(input_dim * expand * d_state // 2, input_dim * expand * d_state // 4),
+                nn.Tanh(),
+                nn.Linear(input_dim * expand * d_state // 4, n_units),
                 nn.Tanh(),
                 nn.Linear(n_units, latent_dim * 2))
             utils.init_network_weights(self.new_state_net)
         else:
             self.new_state_net = new_state_net
 
-    def forward(self, y_mean, y_std, x, masked_update=True):
-        y_concat = torch.cat([y_mean, y_std, x], -1)  # [1, B, rec * 2 + input]
-        y_concat = y_concat.permute(1, 0, 2)  # [B, 1, rec * 2 + input]
-        y_concat = self.mamba(y_concat)
-        y_concat = y_concat.permute(1, 0, 2)
-        new_y, new_y_std = utils.split_last_dim(self.new_state_net(y_concat))
+    def forward(self, y_mean, y_std, x, conv_state, ssm_state, masked_update=True):
+        """
+        mamba update
+        Args:
+            y_mean: [1, B, L]
+            y_std: [1, B, L]
+            x: [1, B, input_dim]
+            conv_state: [B, input_dim * expand, d_conv]
+            ssm_state: [B, input_dim * expand, d_state]
+            masked_update: bool
+
+        Returns:
+
+        """
+        # naive update
+        # y_concat = torch.cat([y_mean, y_std, x], -1)  # [1, B, rec * 2 + input]
+        # y_concat = y_concat.permute(1, 0, 2)  # [B, 1, rec * 2 + input]
+        # y_concat = self.mamba(y_concat)
+        # y_concat = y_concat.permute(1, 0, 2)
+        # new_y, new_y_std = utils.split_last_dim(self.new_state_net(y_concat))
+
+        batch_size = x.shape(1)
+        mamba_input = x.permute(1, 0, 2)  # [B, 1, input]
+        _, new_conv_state, new_ssm_state = self.mamba.step(mamba_input, conv_state, ssm_state)
+        new_y, new_y_std = utils.split_last_dim(self.new_state_net(new_ssm_state.reshape(batch_size, -1)))
+        new_y = new_y.unsqueeze(0)
+        new_y_std = new_y_std.unsqueeze(0)
+
         if masked_update:
             # IMPORTANT: assumes that x contains both data and mask
             # update only the hidden states for hidden state only if at least one feature is present for the
@@ -132,12 +161,15 @@ class mamba_unit(nn.Module):
             mask = x[:, :, n_data_dims:]
             utils.check_mask(x[:, :, :n_data_dims], mask)
 
-            mask = (torch.sum(mask, -1, keepdim=True) > 0).float()
+            mask = (torch.sum(mask, -1, keepdim=True) > 0).float()  # [1, B, 1]
+            mamba_mask = mask.squeeze(0).unsqueeze(-1)  # [B, 1, 1]
 
             assert (not torch.isnan(mask).any())
 
             new_y = mask * new_y + (1 - mask) * y_mean
             new_y_std = mask * new_y_std + (1 - mask) * y_std
+            new_conv_state = mamba_mask * new_conv_state + (1 - mask) * conv_state
+            new_ssm_state = mamba_mask * new_ssm_state + (1 - mask) * ssm_state
 
             if torch.isnan(new_y).any():
                 print("new_y is nan!")
@@ -146,7 +178,7 @@ class mamba_unit(nn.Module):
                 exit()
 
         new_y_std = new_y_std.abs()
-        return new_y, new_y_std
+        return new_y, new_y_std, new_conv_state, new_ssm_state
 
 
 class LSTM_unit(nn.Module):
@@ -177,7 +209,7 @@ class LSTM_unit(nn.Module):
         utils.init_network_weights(self.Gate_gate)
 
         self.output_gate = nn.Sequential(
-            nn.Linear(input_dim + latent_dim * 2, latent_dim * 2),
+            nn.Linear(input_dim + latent_dim * 2, n_units),
             nn.Tanh(),
             nn.Linear(n_units, latent_dim * 2),
         )
@@ -235,6 +267,7 @@ class Encoder_z0_ODE_RNN(nn.Module):
                  z0_dim=None, GRU_update=None,
                  n_gru_units=100,
                  use_lstm=False,
+                 use_mamba=False,
                  device=torch.device("cpu")):
 
         super(Encoder_z0_ODE_RNN, self).__init__()
@@ -257,6 +290,7 @@ class Encoder_z0_ODE_RNN(nn.Module):
         self.device = device
         self.extra_info = None
         self.use_lstm = use_lstm
+        self.use_mamba = use_mamba
 
         self.transform_z0 = nn.Sequential(
             nn.Linear(latent_dim * 2, 100),
@@ -280,6 +314,10 @@ class Encoder_z0_ODE_RNN(nn.Module):
             if self.use_lstm:
                 prev_cell = torch.zeros((1, n_traj, self.latent_dim)).to(self.device)
                 last_yi, last_yi_std, _ = self.GRU_update(prev_y, prev_std, xi, prev_cell)
+            elif self.use_mamba:
+                prev_conv_state = torch.zeros(n_traj, n_dims * self.GRU_update.expand, self.GRU_update.d_conv)
+                prev_ssm_state = torch.zeros(n_traj, n_dims * self.GRU_update.expand, self.GRU_update.d_state)
+                last_yi, last_yi_std, _, _ = self.GRU_update(prev_y, prev_std, xi, prev_conv_state, prev_ssm_state)
             else:
                 last_yi, last_yi_std = self.GRU_update(prev_y, prev_std, xi)
             extra_info = None
@@ -314,6 +352,11 @@ class Encoder_z0_ODE_RNN(nn.Module):
         prev_y = torch.zeros((1, n_traj, self.latent_dim)).to(device)
         prev_std = torch.zeros((1, n_traj, self.latent_dim)).to(device)
         prev_cell = torch.zeros((1, n_traj, self.latent_dim)).to(device)
+        if self.use_mamba:
+            prev_conv_state = torch.zeros(n_traj, n_dims * self.GRU_update.expand, self.GRU_update.d_conv)
+            prev_ssm_state = torch.zeros(n_traj, n_dims * self.GRU_update.expand, self.GRU_update.d_state)
+        else:
+            prev_conv_state, prev_ssm_state = None, None
 
         prev_t, t_i = time_steps[-1] + 0.01, time_steps[-1]
 
@@ -365,6 +408,11 @@ class Encoder_z0_ODE_RNN(nn.Module):
             if self.use_lstm:
                 yi, yi_std, cell = self.GRU_update(yi_ode, prev_std, xi, prev_cell)
                 prev_y, prev_std, prev_cell = yi, yi_std, cell
+            elif self.use_mamba:
+                yi, yi_std, conv_state, ssm_state = self.GRU_update(
+                    yi_ode, prev_std, xi, prev_conv_state, prev_ssm_state
+                )
+                prev_y, prev_std, prev_conv_state, prev_ssm_state = yi, yi_std, conv_state, ssm_state
             else:
                 yi, yi_std = self.GRU_update(yi_ode, prev_std, xi)
                 prev_y, prev_std = yi, yi_std
