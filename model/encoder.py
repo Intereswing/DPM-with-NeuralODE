@@ -587,16 +587,17 @@ class PositionEncoder(nn.Module):
 
         pe = torch.zeros(n_tp, n_dim, requires_grad=False).to(get_device(data))
         time_steps = time_steps.unsqueeze(1)
-        div_term = torch.exp(
+        div_term_0 = torch.exp(
             torch.arange(0, self.input_dim * 2, 4, device=utils.get_device(time_steps))
             * -(math.log(10000.0) / self.input_dim)
         )
+        div_term_1 = torch.exp(
+            torch.arange(2, self.input_dim * 2, 4, device=utils.get_device(time_steps))
+            * -(math.log(10000.0) / self.input_dim)
+        )
 
-        pe[:, 0::2] = torch.sin(time_steps * div_term)
-        if n_dim % 2 == 0:
-            pe[:, 1::2] = torch.cos(time_steps * div_term)
-        else:
-            pe[:, 1::2] = torch.cos(time_steps * div_term[:-1])
+        pe[:, 0::2] = torch.sin(time_steps * div_term_0)
+        pe[:, 1::2] = torch.cos(time_steps * div_term_1)
 
         pe = pe.unsqueeze(0)
         pe = pe.repeat(batch_size, 1, 1)
