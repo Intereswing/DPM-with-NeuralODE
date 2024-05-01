@@ -61,6 +61,49 @@ def compute_binary_CE_loss(labels_pred, labels):
     return ce_loss
 
 
+def compute_multiclass_CE_loss(labels_pred, labels, mask):
+    if len(labels_pred.size()) == 3:
+        labels_pred = labels_pred.unsqueeze(0)
+
+    n_traj_samples, batch_size, n_tp, n_dim = labels_pred.size()
+    labels = labels.repeat(n_traj_samples, 1, 1, 1)
+
+    labels_pred = labels_pred.reshape(n_traj_samples * batch_size * n_tp, n_dim)
+    labels = labels.reshape(n_traj_samples * batch_size * n_tp, n_dim)
+
+    mask = torch.sum(mask, dim=-1) > 0  # [B, T]
+    mask_pred = mask.repeat(n_dim, 1, 1).permute(1, 2, 0)  # [B, T, N]
+
+    mask = mask.repeat(n_traj_samples, 1, 1, 1)
+    mask_pred = mask_pred.repeat(n_traj_samples, 1, 1, 1)
+
+    mask = mask.reshape(n_traj_samples * batch_size * n_tp, 1)
+    mask_pred = mask_pred.reshape(n_traj_samples * batch_size * n_tp, n_dim)
+
+    if (labels_pred.size(-1) > 1) and (labels.size(-1) > 1):
+        assert labels_pred.size(-1) == labels.size(-1)
+        _, labels = labels.max(-1)
+
+    res = []
+    # labels: [n_traj_samples * batch_size * n_tp]
+    for i in range(labels.size(0)):
+        labels_masked = torch.masked_select(labels[i], mask[i].bool())  # [1]
+        labels_pred_masked = torch.masked_select(labels_pred[i], mask_pred[i].bool())  # [n_dim]
+
+        labels_pred_masked = labels_pred_masked.reshape(-1, n_dim)
+
+        if len(labels_masked) == 0:
+            continue
+
+        ce_loss = nn.CrossEntropyLoss()(labels_pred_masked, labels_masked.long())
+        res.append(ce_loss)
+
+    ce_loss = torch.stack(res, dim=0).to(get_device(labels_pred))
+    ce_loss = torch.mean(ce_loss)
+
+    return ce_loss
+
+
 def Gaussian_likelihood(pred_x, truth, obsrv_std):
     n_data_points = pred_x.size()[-1]
 

@@ -15,3 +15,9 @@ python run_models.py --niters 100 -n 8000 -l 20 --dataset physionet --latent-ode
 ```
 python run_models.py --niters 100 -n 8000 -l 20 --dataset physionet --latent-ode --encoder odernn_lstm --rec-dims 40 --rec-layers 3 --gen-layers 3 --units 50 --gru-units 50 --quantization 0.06 --classif
 ```
+
+* Human Activity (attn encoder)
+```
+python run_models.py --niters 200 -n 10000 -l 15 --dataset activity --latent-ode --encoder attn --gen-layers 2 --units 500 --classif  --linear-classif
+
+```

@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
-from model.loss import IWAE_reconstruction_loss, compute_binary_CE_loss, compute_masked_likelihood, mse
+from model.loss import IWAE_reconstruction_loss, compute_binary_CE_loss, compute_masked_likelihood, mse, \
+    compute_multiclass_CE_loss
 from utils.utils import get_device
 
 
@@ -34,7 +35,16 @@ class VAE(nn.Module):
                 labels_prediction = self.classifier(sol_z)
             else:
                 labels_prediction = self.classifier(first_point_enc).squeeze(-1)
-            ce_loss = compute_binary_CE_loss(labels_prediction, batch_dict['labels'])
+
+            if (batch_dict["labels"].size(-1) == 1) or (len(batch_dict["labels"].size()) == 1):
+                ce_loss = compute_binary_CE_loss(labels_prediction, batch_dict['labels'])
+            else:
+                ce_loss = compute_multiclass_CE_loss(
+                    labels_prediction,
+                    batch_dict['labels'],
+                    mask=batch_dict['mask_predicted_data']
+                )
+
             if self.train_classif_w_reconstr:
                 loss = loss + ce_loss * 30
             else:
