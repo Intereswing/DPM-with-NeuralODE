@@ -187,7 +187,7 @@ if __name__ == '__main__':
             z0_diffeq_solver = DiffeqSolver(rec_ode_func, 'euler', odeint_rtol=1e-3, odeint_atol=1e-4).to(device)
             mamba_update = mamba_unit(rec_dims, int(input_dim) * 2, n_units=gru_units).to(device)
             encoder = Encoder_z0_ODE_RNN(rec_dims, int(input_dim) * 2, z0_diffeq_solver,
-                                         z0_dim=latents, GRU_update=mamba_update, use_mamba=True, device=device).to(device)
+                                         z0_dim=latents, GRU_update=mamba_update, device=device).to(device)
 
             # encoder = EncoderMamba(
             #     input_dim=int(input_dim),
