@@ -341,9 +341,9 @@ class Encoder_z0_ODE_RNN(nn.Module):
         n_traj, n_tp, n_dims = data.size()
         extra_info = []
 
-        t0 = time_steps[-1]
+        t0 = time_steps[0]
         if run_backwards:
-            t0 = time_steps[0]
+            t0 = time_steps[-1]
 
         device = get_device(data)
 
@@ -356,7 +356,9 @@ class Encoder_z0_ODE_RNN(nn.Module):
         else:
             prev_conv_state, prev_ssm_state = None, None
 
-        prev_t, t_i = time_steps[-1] + 0.01, time_steps[-1]
+        prev_t, t_i = t0 - 0.01, t0
+        if run_backwards:
+            prev_t, t_i = time_steps[-1] + 0.01, time_steps[-1]
 
         interval_length = time_steps[-1] - time_steps[0]
         minimum_step = interval_length / 50
@@ -368,13 +370,14 @@ class Encoder_z0_ODE_RNN(nn.Module):
 
         latent_ys = []
         # Run ODE backwards and combine the y(t) estimates using gating
+        time_steps_len = len(time_steps)
         time_points_iter = range(0, len(time_steps))
         if run_backwards:
             time_points_iter = reversed(time_points_iter)
 
         for i in time_points_iter:
             # dt太小直接用f'*dt算
-            if (prev_t - t_i) < minimum_step:
+            if abs(t_i - prev_t) < minimum_step:
                 time_points = torch.stack((prev_t, t_i))
                 inc = self.z0_diffeq_solver.ode_func(prev_t, prev_y) * (t_i - prev_t)
 
@@ -386,7 +389,7 @@ class Encoder_z0_ODE_RNN(nn.Module):
                 assert (not torch.isnan(ode_sol).any())
             # 用ode solver感觉意义不大啊，dt一般都很小
             else:
-                n_intermediate_tp = max(2, ((prev_t - t_i) / minimum_step).int())
+                n_intermediate_tp = max(2, (abs(t_i - prev_t) / minimum_step).int())
 
                 time_points = utils.linspace_vector(prev_t, t_i, n_intermediate_tp)
                 ode_sol = self.z0_diffeq_solver(prev_y, time_points)
@@ -415,7 +418,9 @@ class Encoder_z0_ODE_RNN(nn.Module):
                 yi, yi_std = self.GRU_update(yi_ode, prev_std, xi)
                 prev_y, prev_std = yi, yi_std
 
-            prev_t, t_i = time_steps[i], time_steps[i - 1]
+            prev_t, t_i = time_steps[i], time_steps[(i + 1) % time_steps_len]
+            if run_backwards:
+                prev_t, t_i = time_steps[i], time_steps[i - 1]
 
             latent_ys.append(yi)
 

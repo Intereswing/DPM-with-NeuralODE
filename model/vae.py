@@ -20,7 +20,10 @@ class VAE(nn.Module):
     def compute_all_losses(self, batch_dict, n_traj_samples=1, kl_coef=1.):
         first_point_enc, sol_z, pred_x, loss, rec_likelihood, kl_z0, first_point_std = (
             IWAE_reconstruction_loss(batch_dict, self.encoder, self.decoder, self.z0_prior, self.obsrv_std,
-                                     n_traj_samples=n_traj_samples, kl_coef=kl_coef))
+                                     n_traj_samples=n_traj_samples, kl_coef=kl_coef,
+                                     run_backwards=(batch_dict['mode'] != 'extrap')
+                                     )
+        )
 
         mean_se = compute_masked_likelihood(pred_x=pred_x,
                                             truth=batch_dict['data_to_predict'].repeat(n_traj_samples, 1, 1, 1),
