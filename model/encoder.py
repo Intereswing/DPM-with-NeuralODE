@@ -329,6 +329,7 @@ class Encoder_z0_ODE_RNN(nn.Module):
 
         mean_z0, std_z0 = utils.split_last_dim(self.transform_z0(torch.cat((means_z0, std_z0), -1)))
         std_z0 = std_z0.abs()
+        std_z0 = torch.clamp(std_z0, min=1e-20)
         if save_info:
             self.extra_info = extra_info
 
@@ -493,6 +494,7 @@ class Encoder_z0_RNN(nn.Module):
 
         mean, std = utils.split_last_dim(self.hiddens_to_z0(last_output))
         std = std.abs()
+        std = torch.clamp(std, min=1e-20)
 
         assert (not torch.isnan(mean).any())
         assert (not torch.isnan(std).any())
