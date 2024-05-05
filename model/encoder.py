@@ -586,29 +586,36 @@ class PositionEncoder(nn.Module):
 
     def forward(self, data, mask, time_steps):
         batch_size, n_tp, n_dim = data.size()
+        device = utils.get_device(time_steps)
+
         # make embeddings relatively larger
         data = data * math.sqrt(self.input_dim)
 
         pe = torch.zeros(n_tp, n_dim, requires_grad=False).to(get_device(data))
         time_steps = time_steps.unsqueeze(1)
+        # original pe
+        steps = torch.arange(n_tp, device=device)
+        steps = steps.unsqueeze(1)
+
         div_term_0 = torch.exp(
-            torch.arange(0, self.input_dim * 2, 4, device=utils.get_device(time_steps))
+            torch.arange(0, self.input_dim, 2, device=device)
             * -(math.log(10000.0) / self.input_dim)
         )
         div_term_1 = torch.exp(
-            torch.arange(2, self.input_dim * 2, 4, device=utils.get_device(time_steps))
+            torch.arange(1, self.input_dim, 2, device=device)
             * -(math.log(10000.0) / self.input_dim)
         )
 
-        pe[:, 0::2] = torch.sin(time_steps * div_term_0)
-        pe[:, 1::2] = torch.cos(time_steps * div_term_1)
+        pe[:, 0::2] = torch.sin(steps * div_term_0)
+        pe[:, 1::2] = torch.cos(steps * div_term_1)
 
         pe = pe.unsqueeze(0)
-        pe = pe.repeat(batch_size, 1, 1)
-        mask = mask.sum(-1, keepdim=True) == 0.
-        mask = mask.repeat(1, 1, n_dim)
+
         # only mask the tp when no observation is taken.
-        pe = torch.masked_fill(pe, mask, 0)
+        # pe = pe.repeat(batch_size, 1, 1)
+        # mask = mask.sum(-1, keepdim=True) == 0.
+        # mask = mask.repeat(1, 1, n_dim)
+        # pe = torch.masked_fill(pe, mask, 0)
 
         data = data + pe
         # subsample_num = 800
