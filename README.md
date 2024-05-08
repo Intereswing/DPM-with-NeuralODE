@@ -6,15 +6,33 @@ A time series forcasting model based on Latent-ODE.
 python run_models.py --niters 100 -n 8000 -l 20 --dataset physionet --latent-ode --encoder attn --gen-layers 3 --units 50 --quantization 0.06 --classif
 ```
 
-* Physionet (discretization by 3.6 min, mamba encoder)
+* Physionet (discretization by 3.6 min, ode-mamba encoder)
 ```
 python run_models.py --niters 100 -n 8000 -l 20 --dataset physionet --latent-ode --encoder mamba --rec-dims 40 --rec-layers 3 --gen-layers 3 --units 50 --gru-units 50 --quantization 0.06 --classif
 ```
 
-* Physionet (discretization by 3.6 min, lstm-ode encoder)
+* Physionet (discretization by 3.6 min, ode-lstm encoder)
 ```
 python run_models.py --niters 100 -n 8000 -l 20 --dataset physionet --latent-ode --encoder odernn_lstm --rec-dims 40 --rec-layers 3 --gen-layers 3 --units 50 --gru-units 50 --quantization 0.06 --classif
 ```
+
+* Physionet (discretization by 3.6 min, ode-gru encoder)
+```
+python run_models.py --niters 100 -n 8000 -l 20 --dataset physionet --latent-ode --encoder odernn --rec-dims 40 --rec-layers 3 --gen-layers 3 --units 50 --gru-units 50 --quantization 0.06 --classif
+```
+
+* Physionet (discretization by 3.6 min, rnn encoder)
+```
+python run_models.py --niters 100 -n 8000 -l 20 --dataset physionet --latent-ode --encoder rnn --rec-dims 40 --rec-layers 3 --gen-layers 3 --units 50 --gru-units 50 --quantization 0.06 --classif
+```
+
+* Physionet (discretization by 3.6 min, rnn vae)
+```
+python run_models.py --niters 100 -n 8000 -l 20 --dataset physionet --latent-ode --encoder rnn --decoder rnn --rec-dims 40 --rec-layers 3 --gen-layers 3 --units 50 --gru-units 50 --quantization 0.06 --classif
+```
+
+
+
 
 * Human Activity (attn encoder)
 ```

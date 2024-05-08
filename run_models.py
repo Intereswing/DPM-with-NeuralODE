@@ -17,7 +17,7 @@ import torch.optim as optim
 from torch.distributions.normal import Normal
 
 from model.vae import VAE
-from model.decoder import ODEFunc, DiffeqSolver, DiffeqSolverDecoder
+from model.decoder import ODEFunc, DiffeqSolver, DiffeqSolverDecoder, RNNDecoder
 from model.encoder import Encoder_z0_ODE_RNN, EncoderAttention, Encoder_z0_RNN, EncoderMamba, mamba_unit, LSTM_unit
 from model.classifier import Classifier
 from model.loss import IWAE_reconstruction_loss, compute_binary_CE_loss
@@ -67,7 +67,9 @@ parser.add_argument('--noise-weight', type=float, default=0.01, help="Noise ampl
 # model selection
 parser.add_argument('--latent-ode', action='store_true', help="Run Latent ODE seq2seq model")
 parser.add_argument('--encoder', type=str, default='odernn',
-                    help="Type of encoder for Latent ODE model: rnn , odernn, attn, mamba, odernn_lstm")
+                    help="Type of encoder for VAE: rnn , odernn, attn, mamba, odernn_lstm")
+parser.add_argument('--decoder', type=str, default='ode',
+                    help="Type of decoder for VAE: ode, rnn")
 parser.add_argument('--classic-rnn', action='store_true',
                     help="Run RNN baseline: classic RNN that sees true points at every point. "
                          "Used for interpolation only.")
@@ -167,7 +169,8 @@ if __name__ == '__main__':
             z0_diffeq_solver = DiffeqSolver(rec_ode_func, 'euler', odeint_rtol=1e-3, odeint_atol=1e-4).to(device)
             lstm_update = LSTM_unit(rec_dims, int(input_dim) * 2, n_units=gru_units).to(device)
             encoder = Encoder_z0_ODE_RNN(rec_dims, int(input_dim) * 2, z0_diffeq_solver,
-                                         z0_dim=latents, GRU_update=lstm_update, use_lstm=True, device=device).to(device)
+                                         z0_dim=latents, GRU_update=lstm_update, use_lstm=True, device=device).to(
+                device)
 
         elif args.encoder == 'attn':
             encoder = EncoderAttention(
@@ -196,9 +199,16 @@ if __name__ == '__main__':
             # ).to(device)
         else:
             raise Exception('Please provide a valid encoder type')
-        dec_ode_func = ODEFunc(latents, gen_layers, units, nonlinear=nn.Tanh).to(device)
-        decoder = DiffeqSolverDecoder(latents, input_dim, dec_ode_func,
-                                      method='dopri5', odeint_rtol=1e-3, odeint_atol=1e-4).to(device)
+
+        if args.decoder == 'rnn':
+            decoder = RNNDecoder(latents, input_dim, units).to(device)
+        elif args.decoder == 'ode':
+            dec_ode_func = ODEFunc(latents, gen_layers, units, nonlinear=nn.Tanh).to(device)
+            decoder = DiffeqSolverDecoder(latents, input_dim, dec_ode_func,
+                                          method='dopri5', odeint_rtol=1e-3, odeint_atol=1e-4).to(device)
+        else:
+            raise Exception('Please provide a valid decoder type')
+
         classifier = Classifier(latents, n_labels, ues_linear_classifier=args.linear_classif).to(device) \
             if args.classif else None
         model = VAE(encoder=encoder,
@@ -218,7 +228,7 @@ if __name__ == '__main__':
         exit()
 
     # training
-    log_path = 'logs/' + file_name + '_' + str(experimentID) + '_' + args.encoder + '_' + args.dataset + '.log'
+    log_path = 'logs/' + file_name + '_' + str(experimentID) + '_' + args.encoder + '_' + args.decoder + '_' + args.dataset + '.log'
     utils.makedirs('logs/')
     logger = utils.get_logger(logpath=log_path, filepath=os.path.abspath(__file__))
     logger.info(input_command)

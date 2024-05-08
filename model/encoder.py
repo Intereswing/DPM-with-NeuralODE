@@ -606,16 +606,16 @@ class PositionEncoder(nn.Module):
             * -(math.log(10000.0) / self.input_dim)
         )
 
-        pe[:, 0::2] = torch.sin(steps * div_term_0)
-        pe[:, 1::2] = torch.cos(steps * div_term_1)
+        pe[:, 0::2] = torch.sin(time_steps * div_term_0)
+        pe[:, 1::2] = torch.cos(time_steps * div_term_1)
 
         pe = pe.unsqueeze(0)
 
         # only mask the tp when no observation is taken.
-        # pe = pe.repeat(batch_size, 1, 1)
-        # mask = mask.sum(-1, keepdim=True) == 0.
-        # mask = mask.repeat(1, 1, n_dim)
-        # pe = torch.masked_fill(pe, mask, 0)
+        pe = pe.repeat(batch_size, 1, 1)
+        mask = mask.sum(-1, keepdim=True) == 0.
+        mask = mask.repeat(1, 1, n_dim)
+        pe = torch.masked_fill(pe, mask, 0)
 
         data = data + pe
         # subsample_num = 800

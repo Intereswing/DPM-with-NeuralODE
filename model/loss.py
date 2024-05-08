@@ -5,6 +5,7 @@ from torch.distributions.kl import kl_divergence
 from torch.distributions.normal import Normal
 from utils.utils import get_device
 from utils import utils
+from model.decoder import RNNDecoder
 
 
 def IWAE_reconstruction_loss(batch_dict, encoder, decoder, z0_prior, obsrv_std,
@@ -22,6 +23,8 @@ def IWAE_reconstruction_loss(batch_dict, encoder, decoder, z0_prior, obsrv_std,
     assert (torch.sum(first_point_std < 0) == 0.)
 
     # Reparameterization
+    if isinstance(decoder, RNNDecoder):
+        n_traj_samples = 1
     means_z0 = first_point_mu.repeat(n_traj_samples, 1, 1)
     sigma_z0 = first_point_std.repeat(n_traj_samples, 1, 1)
     first_point_enc = utils.sample_standard_gaussian(means_z0, sigma_z0)
