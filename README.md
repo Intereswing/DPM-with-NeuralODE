@@ -40,12 +40,27 @@ python run_models.py --niters 200 -n 10000 -l 15 --dataset activity --latent-ode
 
 ```
 
-* Human Activity (mamba encoder)
+* Human Activity (ode-mamba encoder)
 ```
 python run_models.py --niters 200 -n 10000 -l 15 --dataset activity --latent-ode --encoder mamba --rec-dims 100 --rec-layers 4 --gen-layers 2 --units 500 --gru-units 50 --classif  --linear-classif
 ```
 
-* Human Activity (lstm-ode encoder)
+* Human Activity (ode-lstm encoder)
 ```
 python run_models.py --niters 200 -n 10000 -l 15 --dataset activity --latent-ode --encoder odernn_lstm --rec-dims 100 --rec-layers 4 --gen-layers 2 --units 500 --gru-units 50 --classif  --linear-classif
+```
+
+* Human Activity (ode-rnn encoder)
+```
+python run_models.py --niters 200 -n 10000 -l 15 --dataset activity --latent-ode --encoder odernn --rec-dims 100 --rec-layers 4 --gen-layers 2 --units 500 --gru-units 50 --classif  --linear-classif
+```
+
+* Human Activity (rnn encoder)
+```
+python run_models.py --niters 200 -n 10000 -l 15 --dataset activity --latent-ode --encoder rnn --rec-dims 100 --rec-layers 4 --gen-layers 2 --units 500 --gru-units 50 --classif  --linear-classif
+```
+
+* Human Activity (rnn vae)
+```
+python run_models.py --niters 200 -n 10000 -l 15 --dataset activity --latent-ode --encoder rnn --decoder rnn --rec-dims 100 --rec-layers 4 --gen-layers 2 --units 500 --gru-units 50 --classif  --linear-classif
 ```
